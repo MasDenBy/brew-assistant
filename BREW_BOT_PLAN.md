@@ -2,7 +2,7 @@
 
 **Working directory:** `C:\Ihar\Projects\brew-assistant`  
 **Status:** Planning / Phase 1 (Prototype)  
-**Last updated:** Sun Oct 25 2026
+**Last updated:** Sun Nov 01 2026
 
 ---
 
@@ -196,7 +196,7 @@ RAG tuning (not model fine-tuning in MVP):
 
 ## 11. Open Questions (to resolve during implementation)
 
-- [ ] Frontend: Streamlit vs. Gradio?
-- [ ] RAG framework: LangChain vs. LlamaIndex?
-- [ ] Which 7B model to start with: Llama-3.1-8B vs. Qwen2.5-7B vs. Mistral-7B?
-- [ ] Exact public data sources for BeerXML recipes and hop/malt references?
+- [x] Frontend: Streamlit vs. Gradio? → **Streamlit** (decided Sun Nov 01 2026)
+- [x] RAG framework: LangChain vs. LlamaIndex? → **LangChain** (decided Sun Nov 01 2026)
+- [x] Which 7B model to start with: Llama-3.1-8B vs. Qwen2.5-7B vs. Mistral-7B? → **Qwen2.5-7B** via Ollama (decided Sun Nov 01 2026)
+- [ ] Exact public data sources for BeerXML recipes and hop/malt references? → deferred to Phase 2; Phase 1 uses generated docs (see `PHASE_1_PLAN.md`)
