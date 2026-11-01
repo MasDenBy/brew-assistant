@@ -1,39 +1,43 @@
 # Phase 2 — Data Collection & Expansion Plan
 
-**Status:** Draft v2 (replanned around the data-collector architecture; branch `phase-2`)
+**Status:** Draft v3 (decisions resolved with user; branch `phase-2`)
 **Parent plan:** `BREW_BOT_PLAN.md` (source of truth — §9 "Phase 2 — Data Expansion")
-**Estimate:** ~5–6 days
+**Estimate:** ~6–7 days
 
 ---
 
 ## 1. Design Principles (decided with user)
 
-1. **Repo `data/` = fixtures only.** Only the small files needed to run smoke tests and the eval regression — nothing bulk, nothing third-party, nothing personal.
-2. **Bulk/personal data lives outside git**, in a user-controlled directory (e.g. `\\myshare\brew`). It can be big, licensed, or private.
-3. **A separate collector application** fetches documents from each source and writes them *in canonical RAG format* to that directory. One **data collector = one class = one source** (e.g. `bjcp_collector.py`, `whitelabs_collector.py`).
-4. **Extensible by design:** adding a new source means adding one collector class and enabling it in config — `ingest.py`, `rag.py`, `app.py` never change for a new source.
-5. **User's own data fits the same path:** own recipes/ingredients are dropped into (or copied into) the same directory — no special cases.
+1. **Repo `data/` = fixtures only.** Small files needed for smoke tests and eval regression, plus the self-authored CSV reference tables (license-clean, needed by tests — decision §9.3). Nothing bulk, third-party, or personal in git.
+2. **Bulk/third-party data lives outside git**, collected by a dedicated application into a configurable directory.
+3. **Default destination is `collected_data/`** (gitignored) — easiest for development out of the box. Users point it wherever they want (e.g. `\\myshare\brew`) by changing config.
+4. **`data_dirs` defaults to `[data, collected_data]`** — chat works immediately without running any collector (fixtures alone are enough to try it).
+5. **One data collector = one class = one source** (e.g. `bjcp_collector.py`, `whitelabs_collector.py`). Adding a source = adding a collector class + enabling it in config — `ingest.py`, `rag.py`, `app.py` never change.
 
 ### Target flow
 
 ```
-1. python -m collectors          # run enabled collectors → files land in collect_dest (e.g. \\myshare\brew)
-2. python ingest.py              # reads config data_dirs (fixtures + collect_dest) → ChromaDB
-3. streamlit run app.py          # chat
+1. python -m collectors          # enabled collectors → files land in collect_dest (default: collected_data/)
+2. python ingest.py              # reads data_dirs ([data, collected_data] by default) → ChromaDB
+3. streamlit run app.py          # chat (works even at step 0, on fixtures alone)
 ```
 
 ---
 
 ## 2. Scope
 
-1. **Collector application** (new component): framework + runner + first collectors
-2. **Ingestion reads configurable data dirs** (`data_dirs` in `config.yaml`) instead of a hardcoded `data/`
-3. **New formats via canonical output:** BeerXML recipes, CSV reference tables, BJCP styles — collectors normalize everything to formats ingest already understands (`.md` / `.txt` / `.xml` / `.csv`)
+1. **Collector application** (new): framework + runner + **five MVP collectors**:
+   `diydog`, `bjcp`, `whitelabs`, `wyeast`, `hopunion`
+2. **Ingestion reads configurable `data_dirs`** (default `[data, collected_data]`) instead of hardcoded `data/`
+3. **New formats via canonical output:** BeerXML recipes, BJCP styles, lab/hop reference docs — collectors normalize to formats ingest understands (`.md` / `.txt` / `.xml` / `.csv`)
 4. **Chunking by entity type** (one recipe/style/hop per chunk — AGENTS.md §6.6)
 5. **Search-scope filter** by entity type (retrieval + sidebar)
-6. **Evaluation:** regression gate on the 13 Phase 1 questions + new Phase 2 questions
+6. **Default `top_k` raised 4 → 6** (config change; chunk count grows 5×+)
+7. **Evaluation:** regression gate on the 13 Phase 1 questions + new Phase 2 questions
 
-**Resolved from v1 of this plan:** the BJCP/BeerXML *licensing decision* mostly evaporates — raw third-party files are never committed; collectors download them to the user's local directory. Repo fixtures are self-authored or minimal samples.
+**Resolved from v1:** licensing is handled structurally — raw third-party files are never committed; collectors download to the (gitignored) destination.
+
+**Explicitly deferred:** a `local_folder_collector` for the user's own files — noted in `BREW_BOT_PLAN.md` §11 for later design (users can already point `data_dirs` at any folder of `.md`/`.xml`/`.csv` files, which covers the basic case without a dedicated collector).
 
 ---
 
@@ -43,13 +47,15 @@
 
 ```
 collectors/
-├── __init__.py          # registry: discovers/registers collectors
+├── __init__.py          # registry: @register decorator + collector lookup
 ├── __main__.py          # runner: python -m collectors [--only bjcp,diydog]
-├── base.py              # DataCollector ABC
-├── bjcp_collector.py    # BJCP guidelines → canonical style files
+├── base.py              # DataCollector ABC (+ "how to add a collector" docs)
+├── web.py               # shared helpers: polite HTTP fetch, HTML→text/markdown
 ├── diydog_collector.py  # BrewDog DIY Dog BeerXML recipes → recipes/*.xml
-├── local_folder_collector.py  # user's own files → copy/normalize into dest
-└── (whitelabs_collector.py, ... # Phase 2+ / user-contributed)
+├── bjcp_collector.py    # BJCP 2021 export → bjcp/*.md (one style per file)
+├── whitelabs_collector.py  # White Labs strain pages → ingredients/yeast-*.md
+├── wyeast_collector.py     # Wyeast strain pages → ingredients/yeast-*.md
+└── hopunion_collector.py   # Hop Union variety info → ingredients/hop-*.md
 ```
 
 ```python
@@ -62,56 +68,62 @@ class DataCollector(ABC):
         Must fail soft (warn + skip) when the source is unreachable."""
 ```
 
-- **Registration:** decorator `@register` in `collectors/__init__.py`; runner iterates the registry, filtered by the `collectors:` list in `config.yaml`.
-- **Namespace rule:** each collector owns `collect_dest/<collector_id>/` — re-running one collector never touches another's files or the user's manually placed files.
+- **Registration:** `@register` in `collectors/__init__.py`; runner iterates the registry filtered by the `collectors:` list in `config.yaml`.
+- **Namespace rule:** each collector owns `collect_dest/<collector_id>/` — re-running one collector never touches another's files or manually placed files.
 - **Output contract (collector ↔ ingest):** canonical formats only —
-  `recipes/*.xml` (BeerXML), `bjcp/*.md` or `*.xml`, `tables/*.csv`, `ingredients/*.md`, `styles/*.md`.
+  `recipes/*.xml` (BeerXML), `bjcp/*.md`, `tables/*.csv`, `ingredients/*.md`, `styles/*.md`.
   Type inference extends Phase 1's convention: type from the *type-directory name* at any depth (`recipes/`, `bjcp/`, `tables/`, `styles/`) or the filename prefix (`hop-*`, `malt-*`, `yeast-*`).
+- **Polite fetching (web collectors):** small request volume (one-time, a few dozen pages max), timeout + retry with backoff, descriptive user agent, no hammering; HTML parsed to readable markdown (never commit raw HTML).
 
-### 3.2 Config additions (`config.yaml`)
+### 3.2 Config (`config.yaml`) — updated for Phase 2
 
 ```yaml
-collect_dest: "\\\\myshare\\brew"      # where collectors write (outside git)
+model: qwen2.5:7b
+temperature: 0.3
+top_k: 6                                # raised from 4 (more chunks in the store)
+data_dir: data                          # (kept for reference/tests; ingest uses data_dirs)
 data_dirs:                              # where ingest reads from
-  - data                                # repo fixtures (default — tests work offline)
-  # - \\\\myshare\\brew                  # user adds their collected/personal library
-collectors: [diydog, bjcp, local_folder]  # enabled collectors for `python -m collectors`
+  - data                                # repo fixtures (+ self-authored CSV tables)
+  - collected_data                      # gitignored collector output; chat works without it
+collect_dest: collected_data            # where collectors write (default for dev;
+                                        # user may point elsewhere, e.g. \\myshare\brew)
+collectors: [diydog, bjcp, whitelabs, wyeast, hopunion]
+chroma_dir: chroma_db
+embedding_model: all-MiniLM-L6-v2
 ```
-
-`data/` fixtures and the user's share can both be active: ingest globs every dir in `data_dirs`.
 
 ### 3.3 Ingestion changes
 
-- `load_documents()` iterates `cfg["data_dirs"]` (skip missing dirs with a warning — the share may be offline).
-- `infer_type()` extended for type-directories (`recipes` → `recipe`, `bjcp` → `bjcp_style`, `tables` → from CSV `type` column or filename).
-- No knowledge of collectors — ingest only reads files. The collector app and ingestion are decoupled through the **file-format contract**.
+- `load_documents()` iterates `cfg["data_dirs"]` (skip missing dirs with a warning — `collected_data/` may not exist yet).
+- `infer_type()` extended for type-directories (`recipes` → `recipe`, `bjcp` → `bjcp_style`, `tables` → CSV `type` column or filename).
+- No knowledge of collectors — ingest only reads files; the two apps are decoupled through the **file-format contract**.
 
 ---
 
 ## 4. Definition of Done
 
-1. `python -m collectors` runs the enabled collectors, writes canonical files under `collect_dest/<id>/`, prints a per-collector summary, and skips gracefully (warning, non-zero report) when a source is unreachable.
-2. Repo `data/` contains **only fixtures**: the existing 20 small docs + a tiny sample BeerXML + a small sample CSV — enough for smoke tests and eval; no bulk/third-party/personal files in git.
-3. `python ingest.py` works with default config (fixtures only, zero network) and additionally ingests the share when `data_dirs` is configured; prints per-type counts (`style/hop/malt/yeast/recipe/bjcp_style/table`).
-4. Recipe question → real recipe chunk with citation; BJCP question → guideline numbers with citation; table substitution question → table-backed answer.
+1. `python -m collectors` runs the five enabled collectors, writes canonical files under `collect_dest/<id>/`, prints a per-collector summary, and skips gracefully (warning) when a source is unreachable.
+2. Repo `data/` contains **only** fixtures: the 20 Phase 1 docs, 1–2 hand-written sample BeerXML recipes, and the self-authored CSV tables — chat + all tests run with zero network.
+3. `python ingest.py` works with default config (fixtures present, `collected_data/` missing or empty) and additionally ingests collected data when present; prints per-type counts (`style/hop/malt/yeast/recipe/bjcp_style/table`).
+4. Recipe question → real recipe chunk with citation; BJCP question → guideline numbers with citation; yeast/hop questions → lab/variety docs with citation.
 5. Sidebar **Search scope** filter (entity types) applied to retrieval.
 6. Eval: all 13 Phase 1 questions still PASS; ≥8 new Phase 2 questions added and passing.
 7. Model swap still config-only (regression).
-8. **Extension documented:** "add a source" = subclass `DataCollector` + `@register` + add id to config — no changes to ingest/rag/app (documented in `collectors/base.py` docstring or a short `collectors/README.md`).
+8. **Extension documented:** "add a source" = subclass `DataCollector` + `@register` + add id to config (documented in `collectors/base.py`).
 
 ---
 
-## 5. Collector Catalog (MVP set + future)
+## 5. Collector Catalog
 
-| Collector | Source | Output under `collect_dest/<id>/` | Phase |
-|-----------|--------|-----------------------------------|-------|
-| `diydog_collector` | [stuartraetaylor/diydog-beerxml](https://github.com/stuartraetaylor/diydog-beerxml) (~200 recipes) | `recipes/*.xml` | 2 MVP |
-| `bjcp_collector` | [bjcp.org downloads](https://www.bjcp.org/beer-styles/downloads-and-resources) — 2021 JSON/XML community exports | `bjcp/*.md` (one style per file) | 2 MVP |
-| `local_folder_collector` | User's own folder of recipes/ingredients (BeerXML, md, txt) | `recipes/`, `ingredients/`, `styles/` as applicable | 2 MVP |
-| `whitelabs_collector` / `wyeast_collector` | Lab strain pages | `ingredients/yeast-*.md` | later |
-| `hop_union_collector` / `malt_collector` | Spec-sheet PDFs (hopunion, briess, weyermann) | `ingredients/hop-*.md`, `malt-*.md` | later |
+| Collector | Source | Output under `collect_dest/<id>/` | Fetch type |
+|-----------|--------|-----------------------------------|------------|
+| `diydog_collector` | [stuartraetaylor/diydog-beerxml](https://github.com/stuartraetaylor/diydog-beerxml) (~200 recipes) | `recipes/*.xml` | archive download |
+| `bjcp_collector` | [bjcp.org downloads](https://www.bjcp.org/beer-styles/downloads-and-resources) — 2021 community JSON/XML exports | `bjcp/*.md` (one style per file) | download + convert |
+| `whitelabs_collector` | whitelabs.com public strain pages | `ingredients/yeast-*.md` | web (polite) |
+| `wyeast_collector` | wyeast.com public strain pages | `ingredients/yeast-*.md` | web (polite) |
+| `hopunion_collector` | hopunion.com hop variety info/PDFs | `ingredients/hop-*.md` | web (polite) |
 
-**Repo fixtures (in `data/`, committed):** the 20 Phase 1 docs (they double as eval grounding), 1–2 hand-written sample `.xml` recipes, 1–2 small `.csv` tables. Self-authored CSV reference tables stay in the repo for now (small, license-clean, needed by tests) — see decision §9.3.
+**Repo fixtures (committed, in `data/`):** the 20 Phase 1 docs (they double as eval grounding), 1–2 hand-written sample `.xml` recipes, and the self-authored CSV reference tables (substitutions, alpha acids, yeast/malt comparisons — decision §9.3).
 
 ---
 
@@ -120,18 +132,16 @@ collectors: [diydog, bjcp, local_folder]  # enabled collectors for `python -m co
 ```
 brew-assistant/
 ├── PHASE_2_PLAN.md
-├── config.yaml                # + collect_dest, data_dirs, collectors
-├── collect.py                 # thin alias → python -m collectors (optional)
-├── collectors/                # NEW — the collector application (see §3.1)
-│   ├── base.py
-│   ├── __main__.py
-│   ├── bjcp_collector.py
-│   ├── diydog_collector.py
-│   └── local_folder_collector.py
-├── data/                      # FIXTURES ONLY (git stays small & clean)
+├── config.yaml                # + data_dirs, collect_dest, collectors; top_k=6
+├── collectors/                # NEW — collector application (see §3.1)
+│   ├── base.py  __main__.py  web.py
+│   ├── diydog_collector.py  bjcp_collector.py
+│   ├── whitelabs_collector.py  wyeast_collector.py  hopunion_collector.py
+├── collected_data/            # gitignored — collector output (default collect_dest)
+├── data/                      # FIXTURES ONLY (+ self-authored CSV tables)
 │   ├── styles/  ingredients/  # Phase 1 docs (kept)
 │   ├── recipes/               # 1-2 hand-written sample .xml
-│   └── tables/                # small self-authored .csv
+│   └── tables/                # self-authored .csv reference tables
 ├── ingest.py                  # + data_dirs iteration, extended type inference
 ├── rag.py                     # + optional type filter
 ├── app.py                     # + sidebar search scope
@@ -142,44 +152,49 @@ brew-assistant/
     └── smoke_rag.py           # kept green
 ```
 
+`.gitignore` additions: `collected_data/`.
+
 ---
 
 ## 7. Task Breakdown
 
 ### Step 1 — Collector framework (~0.5 day)
-- `collectors/base.py`: `DataCollector` ABC (`id`, `description`, `collect(dest)`), `@register` registry.
-- `collectors/__main__.py`: reads config, runs enabled collectors in order, per-collector success/skip/fail summary, `--only` flag for running one collector.
-- Config keys: `collect_dest`, `data_dirs`, `collectors`.
-- Document the output contract + "how to add a collector" (§3.1, DoD #8).
+- `collectors/base.py`: `DataCollector` ABC (`id`, `description`, `collect(dest)`), `@register` registry, extension docs.
+- `collectors/__main__.py`: reads config, runs enabled collectors in order, per-collector success/skip/fail summary, `--only` flag.
+- `collectors/web.py`: polite HTTP fetch helper (timeout, retry/backoff, user agent) + HTML→markdown helper.
+- Config keys `collect_dest`, `data_dirs`, `collectors`; `.gitignore` += `collected_data/`; `top_k: 6`.
 
 ### Step 2 — Ingestion: multi-dir + contract test (~0.5 day)
 - `data_dirs` iteration with missing-dir warning; extended `infer_type()` (`recipes/`, `bjcp/`, `tables/` + CSV `type` column).
-- **Fixtures:** add 1–2 sample BeerXML recipes + 1–2 small CSVs under `data/`.
-- New `tests/smoke_ingest.py`: runs ingestion over fixtures only (offline), asserts per-type counts and one chunk per recipe — this pins the collector↔ingest contract.
+- **Fixtures:** add 1–2 hand-written sample BeerXML recipes under `data/recipes/`.
+- New `tests/smoke_ingest.py`: ingestion over fixtures only (offline) — asserts per-type counts and one chunk per recipe; pins the collector↔ingest contract.
 
-### Step 3 — First collectors (~1.5 days)
-- `diydog_collector`: download repo archive → extract `*.xml` → `recipes/`; license check recorded in the collector docstring.
-- `local_folder_collector`: configured source folder → copy/normalize user's `.xml`/`.md`/`.txt` into type dirs (read-only w.r.t. the source).
-- Both idempotent (clear own subtree) and fail-soft (network/folder missing → warn + skip).
+### Step 3 — diydog collector (~0.5 day)
+- Download repo archive → extract `*.xml` → `recipes/`; license note in the collector docstring; fail-soft on network errors.
 
-### Step 4 — BJCP collector (~1 day)
+### Step 4 — bjcp collector (~1 day)
 - Download the 2021 community JSON/XML export → render one `.md` per style (code, name, vital-stat ranges, short impression excerpt) → `bjcp/`.
-- Raw downloads stay in the collector's temp/dest area — never committed.
+- Raw downloads stay in the collector's dest area — never committed.
 
-### Step 5 — Chunking by entity type (~0.5 day)
-- Per-type strategy: `recipe`, `bjcp_style`, table rows → no split (entity = chunk, with a length guard); `.md` → existing splitter only when oversized.
-- Renderer caps recipe detail so one recipe fits one chunk (full hop schedule + fermentables; truncate mash/notes first).
+### Step 5 — Lab & hop web collectors (~1.5 days)
+- `whitelabs_collector`, `wyeast_collector`: iterate public strain pages → normalize (name, attenuation, flocculation, flavor profile, temperature) → `ingredients/yeast-<slug>.md`.
+- `hopunion_collector`: hop variety pages/PDFs (alpha acid %, flavor/aroma, typical uses) → `ingredients/hop-<slug>.md`; if PDF-only, use a pinned light PDF text extractor.
+- Shared `web.py` keeps the three collectors thin; all fail-soft when sites are unreachable or restructured (see §8).
+
+### Step 6 — Chunking by entity type (~0.5 day)
+- Per-type strategy: `recipe`, `bjcp_style`, table rows → no split (entity = chunk, length guard); `.md` → existing splitter only when oversized.
+- Recipe renderer caps detail so one recipe fits one chunk (full hop schedule + fermentables; truncate mash/notes first).
 - Extend the ingest summary to per-type counts.
 
-### Step 6 — Retrieval filter + UI (~0.5 day)
+### Step 7 — Retrieval filter + UI (~0.5 day)
 - `rag.retrieve(query, k, types=None)` → Chroma filter `{"type": {"$in": types}}`; thread through `get_retrieved_sources`.
 - `app.py` sidebar: **Search scope** multiselect (default: all types).
 
-### Step 7 — Evaluation + verification (~1 day)
-- Add ~8–10 rows to `tests/eval_questions.csv`: recipe lookup, recipe detail, BJCP stats, table-backed substitution, yeast/malt comparisons, adversarial (no invented IBU).
+### Step 8 — Evaluation + verification (~1 day)
+- Add ~8–10 rows to `tests/eval_questions.csv`: recipe lookup, recipe detail, BJCP stats, table-backed substitution, lab yeast questions (White Labs/Wyeast), hop variety questions, adversarial (no invented IBU).
 - Full run via `tests/run_eval.py`: **13/13 Phase 1 regression gate** + new rows PASS/MANUAL.
 - Re-run `tests/verify_model_swap.py`.
-- Close Phase 1 grounding gaps where data allows (yeast strain "3004 vs 3068"; phantom citations for `maris-otter.md` / `chocolate-malt.md` — via fixtures or a later lab collector).
+- Close Phase 1 grounding gaps where data allows (yeast strain "3004 vs 3068"; phantom citations for `maris-otter.md` / `chocolate-malt.md`).
 
 ---
 
@@ -187,20 +202,21 @@ brew-assistant/
 
 | Risk | Mitigation |
 |------|------------|
-| **Source unreachable** (network down, share offline, repo removed) | Collectors fail soft with a warning; ingest skips missing `data_dirs` with a warning; fixtures keep tests/chat usable offline |
+| **Source unreachable** (network down, repo removed, share offline) | Collectors fail soft with a warning; ingest skips missing `data_dirs`; fixtures keep chat + tests usable offline |
+| **Web collector fragility** (whitelabs/wyeast/hopunion restructure pages, block scrapers, or restrict ToS) | Isolate each in its own collector with a shared `web.py`; strict one-time polite fetching (tiny request count); if a site blocks automated access, fall back to manual seeding of strain/variety `.md` files into the collector's dest namespace; verify ToS compliance when implementing Step 5 |
 | **Contract drift** between collector output and ingest expectations | Canonical-format contract (§3.1) + `tests/smoke_ingest.py` pins it; ingest only ever sees files |
-| **Re-collect clobbering user's manual files** | Each collector owns only `collect_dest/<id>/`; user's own files live outside collector subtrees (or under `local_folder`'s namespace) |
-| **Licensing / personal data in git** | Nothing third-party or personal is committed; collectors write outside the repo; fixtures are self-authored/minimal |
-| **Chunk inflation dilutes retrieval** (`top_k=4` vs 100+ chunks) | Re-measure with eval after Step 5; raise default `top_k` via config if needed (decision §9.4) |
+| **Re-collect clobbering manual files** | Each collector owns only `collect_dest/<id>/` |
+| **Licensing / personal data in git** | Nothing third-party or personal is committed; `collected_data/` gitignored; fixtures self-authored/minimal |
+| **Retrieval dilution** (`top_k=6` vs growing store) | `top_k` raised by default (decision §9.4); type filter gives precise scoping; re-measure via eval |
 | **BeerXML structure variance** | Renderer normalizes; fixture contract test over a known recipe |
-| **New deps** (HTTP for collectors, JSON/BeerXML parsing) | Prefer stdlib (`urllib`, `json`, `xml.etree`); pin anything added in `requirements.txt` |
+| **New deps** (HTTP, HTML→md, optional PDF) | Prefer stdlib (`urllib`, `json`, `xml.etree`); pin anything added (`beautifulsoup4`/`html2text`, maybe `pypdf`) in `requirements.txt` |
 
 ---
 
-## 9. Decisions Needed from User
+## 9. Resolved Decisions (with user)
 
-1. **`collect_dest` default:** `\\myshare\brew` as in your example? And should `data_dirs` default to `[data]` only (user opts in to the share), or `[data, collect_dest]` automatically?
-2. **MVP collector set:** is `diydog + bjcp + local_folder` the right first three? (Whitelabs/Wyeast/hop/malt collectors later.)
-3. **Self-authored CSV tables:** keep the small reference tables in repo `data/` (needed by tests, license-clean) — or route them through a `static_tables_collector` so *everything* lives outside git?
-4. **New default `top_k`:** keep 4 or raise (e.g. 6) once the collection grows?
-5. **Local-folder semantics:** should `local_folder_collector` *copy* files into the dest (self-contained) or *read them in place* (no duplication)?
+1. **`collect_dest`:** default `collected_data/` (gitignored) for easy development; users point it wherever they like. **`data_dirs`:** default `[data, collected_data]` — chat usable without running collectors.
+2. **MVP collectors:** `diydog`, `bjcp`, `whitelabs`, `wyeast`, `hopunion`.
+3. **Self-authored CSV reference tables:** stay in repo `data/` (needed for testing, license-clean).
+4. **Default `top_k`:** raised from 4 to **6**.
+5. **`local_folder_collector`:** out of scope for Phase 2 — recorded in `BREW_BOT_PLAN.md` §11 for later consideration. (Basic own-file support exists via `data_dirs`, which accepts any folder of `.md`/`.xml`/`.csv`.)
