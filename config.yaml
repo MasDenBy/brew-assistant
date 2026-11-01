@@ -1,0 +1,8 @@
+# Brew Assistant configuration.
+# The Ollama model name lives ONLY here — never hardcode it in business logic.
+model: qwen2.5:7b
+temperature: 0.3
+top_k: 4
+data_dir: data
+chroma_dir: chroma_db
+embedding_model: all-MiniLM-L6-v2
