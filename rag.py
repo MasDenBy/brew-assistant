@@ -41,7 +41,10 @@ PROMPT = ChatPromptTemplate.from_messages(
     [
         ("system", SYSTEM_PROMPT),
         ("placeholder", "{history}"),
-        ("human", "{question}"),
+        # The retrieved context MUST be referenced here — a template variable
+        # that is passed but never rendered is silently dropped (bug present
+        # since Step 5: answers were model priors, not grounded content).
+        ("human", "Context documents:\n{context}\n\nQuestion: {question}"),
     ]
 )
 

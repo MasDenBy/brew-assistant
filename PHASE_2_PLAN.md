@@ -191,6 +191,8 @@ brew-assistant/
 - `app.py` sidebar: **Search scope** multiselect (default: all types).
 
 ### Step 8 — Evaluation + verification (~1 day)
+> **Found in Step 2:** `PROMPT` had no `{context}` placeholder since Phase 1 Step 5 — retrieved documents were **never sent to the LLM** (`context=` passed but silently dropped). The 13/13 Phase 1 eval was answered from model priors (tells: phantom citations `recipes/americanamberale.md`, hallucinated "Wyeast 3004"). Fixed by injecting context into the human turn; post-fix eval baseline: **11 pass / 0 fail / 2 manual**, Hefeweizen now correctly says Wyeast 3068. Step 8 works from this grounded baseline.
+
 - Add ~8–10 rows to `tests/eval_questions.csv`: recipe lookup, recipe detail, BJCP stats, table-backed substitution, lab yeast questions (White Labs/Wyeast), hop variety questions, adversarial (no invented IBU).
 - Full run via `tests/run_eval.py`: **13/13 Phase 1 regression gate** + new rows PASS/MANUAL.
 - Re-run `tests/verify_model_swap.py`.
