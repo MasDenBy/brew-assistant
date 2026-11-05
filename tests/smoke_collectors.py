@@ -1,13 +1,16 @@
 """Smoke test for the collector framework (offline — no real sources).
 
 Covers: registry, namespace rule, runner statuses (OK/SKIP/FAIL/MISSING),
-and the HTML→markdown helper used by web collectors.
+the HTML→markdown helper used by web collectors, and the diydog archive
+extraction (synthetic zip, no network).
 
 Run: .venv\\Scripts\\python.exe tests\\smoke_collectors.py
 """
+import io
 import shutil
 import sys
 import tempfile
+import zipfile
 from pathlib import Path
 
 ROOT = Path(__file__).resolve().parent.parent
@@ -93,8 +96,34 @@ def main() -> None:
         assert "| Temp" in md, f"table cell not converted: {md!r}"
         assert "<" not in md, f"raw HTML leaked: {md!r}"
 
+        # --- diydog extraction: synthetic zip, no network ---
+        from collectors.diydog_collector import extract_beerxml
+
+        buf = io.BytesIO()
+        with zipfile.ZipFile(buf, "w") as zf:
+            zf.writestr(
+                "diydog-beerxml-master/ab01.xml",
+                "<RECIPES><RECIPE><NAME>Ab1</NAME></RECIPE></RECIPES>",
+            )
+            zf.writestr(
+                "diydog-beerxml-master/ab02.xml",
+                "<RECIPES><RECIPE><NAME>Ab2</NAME></RECIPE></RECIPES>",
+            )
+            zf.writestr("diydog-beerxml-master/README.md", "# not xml")
+        dog_dest = tmp / "diydog"
+        files = extract_beerxml(buf.getvalue(), dog_dest)
+        assert len(files) == 2, files
+        assert (dog_dest / "recipes" / "ab01.xml").is_file()
+        assert not (dog_dest / "recipes" / "README.md").exists(), "non-xml leaked"
+        # idempotent: stale file from a previous run is cleared
+        stale = dog_dest / "recipes" / "stale.xml"
+        stale.write_text("old", encoding="utf-8")
+        files = extract_beerxml(buf.getvalue(), dog_dest)
+        assert len(files) == 2 and not stale.exists(), "stale file survived re-run"
+
         print("PASS: registry, runner statuses (OK/SKIP/FAIL/MISSING),")
-        print("      namespace rule, HTML -> markdown conversion")
+        print("      namespace rule, HTML -> markdown conversion,")
+        print("      diydog zip extraction (idempotent, xml only)")
     finally:
         shutil.rmtree(tmp, ignore_errors=True)
 
