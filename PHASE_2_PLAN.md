@@ -200,6 +200,15 @@ brew-assistant/
 - `rag.retrieve(query, k, types=None)` → Chroma filter `{"type": {"$in": types}}`; thread through `get_retrieved_sources`.
 - `app.py` sidebar: **Search scope** multiselect (default: all types).
 
+Verification:
+- Store unchanged at 1,285 chunks; scope list derived at runtime from Chroma metadata (`type_counts()`): `style 10, bjcp_style 110, hop 133, malt 385, yeast 315, recipe 328, table 4` — 7 entries in `TYPE_ORDER` order (`ingredient` absent: no chunks of that type).
+- Measured on 1,285 rows: metadata scan ~25–35 ms (cached per process, so Streamlit reruns do not rescan); filtered query `{"type": {"$in": ["yeast"]}}` ~10 ms vs ~8 ms unfiltered.
+- Single retrieval per turn: one filtered `retrieve()` feeds both the prompt context and the sources panel (`stream_answer(..., docs=docs)`), so the Top-K slider now controls answer context as well as the panel; the old config-`top_k` double retrieval is gone. Re-ingest calls `reset_caches()` (store + type counts).
+- `smoke_retrieval.py` rewritten as assertions: type/count table + `PASS` for unfiltered k=6, `["hop"]`, `["hop","malt"]`, `["bjcp_style"]`, unknown type → `[]`, empty scope == unfiltered, source-dict shape; prints `SKIP: store not ingested` and exits 0 on a fresh clone. `smoke_rag.py` adds `ask(..., types=["hop"])` → answer non-empty and every source `hop`.
+- `smoke_ingest.py`, `smoke_collectors.py`, `verify_model_swap.py` green; `run_eval.py` unchanged at **11 pass / 0 fail / 2 manual** (default path takes no filter).
+- UI via Streamlit `AppTest`: 7 scope entries with counts, all selected by default; BJCP-only scope → `bjcp/…` sources only; cleared selection searches all types (mixed hop+recipe sources); Top-K 1 → 1 source, 6 → 6; re-ingest succeeds and the counts re-render; empty store hides the multiselect and shows the "run ingestion" caption.
+- DoD #5 satisfied.
+
 ### Step 8 — Evaluation + verification (~1 day)
 > **Found in Step 2:** `PROMPT` had no `{context}` placeholder since Phase 1 Step 5 — retrieved documents were **never sent to the LLM** (`context=` passed but silently dropped). The 13/13 Phase 1 eval was answered from model priors (tells: phantom citations `recipes/americanamberale.md`, hallucinated "Wyeast 3004"). Fixed by injecting context into the human turn; post-fix eval baseline: **11 pass / 0 fail / 2 manual**, Hefeweizen now correctly says Wyeast 3068. Step 8 works from this grounded baseline.
 

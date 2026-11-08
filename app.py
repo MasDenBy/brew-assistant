@@ -25,8 +25,10 @@ def list_ollama_models() -> list[str]:
         return []
 
 
-def render_sources(sources: list[dict]) -> None:
+def render_sources(sources: list[dict], scope: list[str] | None = None) -> None:
     """Render retrieved chunks for one answer."""
+    if scope:
+        st.caption("searched: " + ", ".join(scope))
     st.caption("Retrieved sources")
     for s in sources:
         with st.expander(f"[{s['type']}] {s['title']} — {s['source']}"):
@@ -58,6 +60,22 @@ def main() -> None:
             "Top-K documents", 1, 8, int(cfg["top_k"]),
             help="How many chunks to retrieve per question",
         )
+        counts = rag.type_counts()
+        scope_options = rag.scope_options()
+        if scope_options:
+            scope = st.multiselect(
+                "Search scope",
+                scope_options,
+                default=scope_options,
+                format_func=lambda t: (
+                    f"{rag.TYPE_LABELS.get(t, t.replace('_', ' ').title())} "
+                    f"({counts.get(t, 0)})"
+                ),
+                help="Only retrieve these document types. Leave empty to search everything.",
+            )
+        else:
+            scope = []
+            st.caption("Search scope: run ingestion to enable type filtering.")
         show_sources = st.toggle("Show sources", value=True)
 
         st.divider()
@@ -70,7 +88,7 @@ def main() -> None:
                 except SystemExit as e:
                     st.error(str(e))
                     return
-                rag._get_vectorstore.cache_clear()  # drop stale cached store
+                rag.reset_caches()  # drop stale store + type counts
             last_line = buf.getvalue().splitlines()[-1] if buf.getvalue() else "done"
             st.success(f"Re-ingested: {last_line}")
 
@@ -88,7 +106,7 @@ def main() -> None:
         with st.chat_message(msg["role"]):
             st.markdown(msg["content"])
             if msg["role"] == "assistant" and show_sources and msg.get("sources"):
-                render_sources(msg["sources"])
+                render_sources(msg["sources"], msg.get("scope"))
 
     # ---------- New question ----------
     if prompt := st.chat_input("Ask about beer styles, hops, malts, yeasts…"):
@@ -100,15 +118,18 @@ def main() -> None:
             (m["role"], m["content"]) for m in st.session_state.messages[:-1]
         ]
         with st.chat_message("assistant"):
+            docs = rag.retrieve(prompt, k=top_k, types=scope)
+            sources = rag.docs_to_sources(docs)
             answer = st.write_stream(
-                rag.stream_answer(prompt, history, model=model, temperature=temperature)
+                rag.stream_answer(
+                    prompt, history, model=model, temperature=temperature, docs=docs
+                )
             )
-            sources = rag.get_retrieved_sources(prompt, k=top_k)
             if show_sources:
-                render_sources(sources)
+                render_sources(sources, scope)
 
         st.session_state.messages.append(
-            {"role": "assistant", "content": answer, "sources": sources}
+            {"role": "assistant", "content": answer, "sources": sources, "scope": scope}
         )
 
 
