@@ -3,6 +3,9 @@
 Pins the collector <-> ingest contract from PHASE_2_PLAN.md §3.1:
 - fixtures under data/ load with the expected per-type counts
 - one chunk per <RECIPE> (recipes are never split, even oversized ones)
+- BeerXML amounts render as kg (>= 1 kg) / grams (< 1 kg); zero placeholders dropped
+- recipe notes are noise-free and capped; PunkAPI/DIY Dog metadata stripped
+- never-split entities are capped at MAX_ENTITY_CHARS with a truncation marker
 - CSV rows: `type` column > filename prefix > tables/ dir precedence
 - missing data dirs are skipped with a warning, not a crash
 - every chunk carries source/type/title metadata
@@ -12,6 +15,7 @@ Run: .venv\\Scripts\\python.exe tests\\smoke_ingest.py
 import contextlib
 import io
 import sys
+import xml.etree.ElementTree as ET
 from collections import Counter
 from pathlib import Path
 
@@ -21,13 +25,27 @@ sys.path.insert(0, str(ROOT))
 from langchain_core.documents import Document  # noqa: E402
 
 from config import load_config  # noqa: E402
-from ingest import chunk_documents, load_documents  # noqa: E402
+from ingest import (  # noqa: E402
+    MAX_ENTITY_CHARS,
+    NOTES_MAX_CHARS,
+    NOTES_TRUNCATION,
+    TRUNCATION_NOTE,
+    chunk_documents,
+    load_documents,
+    render_recipe,
+)
 
 FIXTURE_DIR = ROOT / "data"
 
 
 def _counts(chunks: list[Document]) -> dict[str, int]:
     return dict(Counter(c.metadata["type"] for c in chunks))
+
+
+def _render(recipe_inner: str) -> str:
+    """Render a recipe body wrapped in a minimal BeerXML document."""
+    root = ET.fromstring(f"<RECIPES><RECIPE>{recipe_inner}</RECIPE></RECIPES>")
+    return render_recipe(root.find(".//RECIPE"))[0]
 
 
 def main() -> None:
@@ -68,7 +86,8 @@ def main() -> None:
     assert "Style: American IPA (21A)" in text
     assert "OG 1.064" in text and "IBU 60" in text
     assert "- Cascade, 40 g, boil 60 min, alpha 5.5%" in text
-    assert "- Pale 2-Row, 4500 g, 3 SRM" in text
+    assert "- Pale 2-Row, 4.5 kg, 3 SRM" in text
+    assert "- Crystal 40L, 250 g, 40 SRM" in text
     assert "<RECIPE>" not in text, "raw XML leaked into chunk"
     assert ipa.metadata["title"] == "Cascade Single-Hop IPA"
     assert ipa.metadata["style"] == "American IPA"
@@ -103,6 +122,51 @@ def main() -> None:
     assert "skipping" in warning and "no_such_dir_xyz" in warning, warning
     assert len(docs_again) == len(docs)
 
+    # --- recipe amounts: kg above 1 kg, grams below; zero placeholders gone ---
+    diydog_like = """
+        <NAME>Punk IPA</NAME>
+        <OG>0.0</OG>
+        <FG>0.0</FG>
+        <IBU>70</IBU>
+        <STYLE>
+          <NAME>Generic Ale Profile</NAME>
+          <CATEGORY_NUMBER>0</CATEGORY_NUMBER>
+        </STYLE>
+        <FERMENTABLES>
+          <FERMENTABLE><NAME>Extra Pale</NAME><AMOUNT>4.38</AMOUNT></FERMENTABLE>
+          <FERMENTABLE><NAME>Caramalt</NAME><AMOUNT>0.25</AMOUNT></FERMENTABLE>
+          <FERMENTABLE><NAME>Crystal 150</NAME><AMOUNT>1</AMOUNT></FERMENTABLE>
+        </FERMENTABLES>
+        <HOPS>
+          <HOP><NAME>Chinook</NAME><AMOUNT>0.02</AMOUNT><USE>Boil</USE><TIME>60</TIME><ALPHA>13.0</ALPHA></HOP>
+          <HOP><NAME>Chinook</NAME><AMOUNT>0.005</AMOUNT><USE>Dry Hop</USE><TIME>0</TIME></HOP>
+        </HOPS>
+    """
+    diydog_text = _render(diydog_like)
+    assert "Style: Generic Ale Profile\n" in diydog_text  # no bogus "(0)"
+    assert "- Extra Pale, 4.38 kg" in diydog_text
+    assert "- Caramalt, 250 g" in diydog_text
+    assert "- Crystal 150, 1 kg" in diydog_text
+    assert "- Chinook, 20 g, boil 60 min, alpha 13%" in diydog_text
+    assert "- Chinook, 5 g, dry hop" in diydog_text  # TIME 0 omitted
+    assert "OG 0.0" not in diydog_text and "FG 0.0" not in diydog_text
+    assert "IBU 70" in diydog_text
+
+    # --- recipe notes: PunkAPI noise stripped, first paragraph, length cap ---
+    notes_text = _render(
+        "<NAME>Noise Test</NAME><NOTES>"
+        "Brewdog Noise Test\n\n"
+        "Tagline: Test Ale.\nDescription:\n" + "hoppy " * 200 + "\n\n"
+        "Food pairing:\n[cheese]\n\n"
+        "Contributed by: Someone &lt;someone&gt;\nPunkAPI id: 29</NOTES>"
+    ).split("## Notes", 1)[1].strip()
+    assert "Contributed by" not in notes_text, notes_text
+    assert "PunkAPI id" not in notes_text, notes_text
+    assert "Brewdog Noise Test" not in notes_text, "title paragraph kept"
+    assert notes_text.startswith("Tagline: Test Ale."), notes_text
+    assert len(notes_text) <= NOTES_MAX_CHARS + len(NOTES_TRUNCATION), notes_text
+    assert notes_text.endswith(NOTES_TRUNCATION), notes_text
+
     # --- chunking rules: oversized recipe never splits, oversized md does ---
     big_recipe = Document(
         page_content="x" * (5000),
@@ -119,8 +183,58 @@ def main() -> None:
     assert len(style_parts) > 1, "oversized style doc should be split"
     assert split_count == 1, split_count
 
+    # --- length guard on every never-split entity type ---
+    originals = {
+        t: f"{'z' * 2000}\n## Second section\n\n{'b' * 3000}"
+        for t in ("recipe", "bjcp_style", "table")
+    }
+    big_entities = [
+        Document(
+            page_content=body,
+            metadata={"source": f"guard/{t}.md", "type": t, "title": f"{t}-title"},
+        )
+        for t, body in originals.items()
+    ]
+    guarded, guard_splits = chunk_documents(big_entities)
+    assert guard_splits == 0, guard_splits
+    assert len(guarded) == len(big_entities) == 3
+    for chunk in guarded:
+        text = chunk.page_content
+        etype = chunk.metadata["type"]
+        assert len(text) <= MAX_ENTITY_CHARS, (etype, len(text))
+        assert text.endswith(TRUNCATION_NOTE), etype
+        assert "Second section" not in text, "cut not made at section boundary"
+        assert text.startswith("z" * 100), etype
+        assert chunk.metadata["truncated"] is True
+        assert chunk.metadata["chars"] == len(originals[etype])
+        assert chunk.metadata["source"] == f"guard/{etype}.md"
+        assert chunk.metadata["title"] == f"{etype}-title"
+
+    # fallback: no section boundary -> cut at the last newline
+    lines = "line of brewing text\n" * 300  # 6300 chars, no "## " headings
+    guarded, _ = chunk_documents(
+        [Document(page_content=lines, metadata={"source": "t/x", "type": "table", "title": "t"})]
+    )
+    assert len(guarded) == 1
+    body = guarded[0].page_content.removesuffix(TRUNCATION_NOTE).rstrip()
+    assert len(guarded[0].page_content) <= MAX_ENTITY_CHARS
+    assert body.endswith("line of brewing text"), body[-40:]
+
+    # --- real collected data: guard bounds every chunk and demonstrably engages ---
+    collected = ROOT / "collected_data"
+    if collected.is_dir():
+        all_chunks, _ = chunk_documents(load_documents([FIXTURE_DIR, collected]))
+        too_long = [c for c in all_chunks if len(c.page_content) > MAX_ENTITY_CHARS]
+        assert not too_long, f"{len(too_long)} chunks exceed {MAX_ENTITY_CHARS} chars"
+        assert any(c.metadata.get("truncated") for c in all_chunks), (
+            "length guard never engaged on collected data"
+        )
+    else:
+        print("SKIP: collected_data/ absent - guard-vs-real-data check not run")
+
     print("PASS: fixture counts, one-chunk-per-recipe, CSV type precedence,")
-    print("      metadata contract, missing-dir warning, split rules")
+    print("      metadata contract, missing-dir warning, kg/g amounts, notes cap,")
+    print("      split rules, never-split length guard")
 
 
 if __name__ == "__main__":

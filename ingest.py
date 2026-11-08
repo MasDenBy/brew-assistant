@@ -7,6 +7,15 @@ collectors/base.py), from every directory in `config.yaml: data_dirs`:
     .xml         BeerXML recipes                -> one doc per <RECIPE> (never split)
     .csv         reference tables               -> one doc per row (never split)
 
+Chunking policy (AGENTS.md section 6.6): the entity is the chunk. Recipes,
+BJCP style guidelines and table rows are never split; oversized documents
+among them are capped at MAX_ENTITY_CHARS with a truncation marker, because
+the embedding model only sees its first ~1000 characters and an unbounded
+document would also blow the prompt budget. Everything else (hop/malt/yeast
+docs) uses the text splitter, which only splits when oversized. The 1900-char
+caps inside the hop/malt/yeast collectors exist to avoid *splitting* them;
+this guard bounds the entities that are *never* split.
+
 Missing directories (e.g. collected_data/ before the first collector run)
 are skipped with a warning, so fixtures alone keep the app usable.
 
@@ -38,6 +47,13 @@ CHUNK_OVERLAP = 200
 # (AGENTS.md section 6.6: one recipe / one style guideline / one table row
 # per chunk).
 NOSPLIT_TYPES = {"recipe", "table", "bjcp_style"}
+
+# Length guard for never-split entities. Data-driven: 2600 chars caps 75 of
+# the 110 BJCP docs while keeping flavor/comparison sections intact for most.
+# Beyond it the embedding model (all-MiniLM-L6-v2, 256 tokens ~ first 1000
+# chars) is blind to the tail and top_k chunks overflow Ollama's context.
+MAX_ENTITY_CHARS = 2600
+TRUNCATION_NOTE = "\n\n(truncated: document continues beyond this chunk)\n"
 
 # Authoritative type directories, recognized at any depth so collector
 # output like collected_data/<collector>/recipes/*.xml classifies correctly.
@@ -113,12 +129,75 @@ def _el_text(parent: ET.Element | None, tag: str) -> str:
     return el.text.strip()
 
 
+def _num(text: str) -> float | None:
+    """Parse a BeerXML numeric field; None when blank or non-numeric."""
+    try:
+        return float(text)
+    except (TypeError, ValueError):
+        return None
+
+
+def _positive(text: str) -> float | None:
+    """Field value, or None when blank/zero (BeerXML exports pad with zeros)."""
+    value = _num(text)
+    return value if value is not None and value > 0 else None
+
+
+def _fmt_num(value: float) -> str:
+    """Trim float noise: 20.0 -> '20', 1.064 -> '1.064', 4.38 -> '4.38'."""
+    text = f"{value:.3f}".rstrip("0").rstrip(".")
+    return text or "0"
+
+
+def _fmt_amount(kg: float) -> str:
+    """BeerXML AMOUNT is kilograms; render grams below 1 kg for readability."""
+    if kg < 1:
+        return f"{_fmt_num(kg * 1000)} g"
+    return f"{_fmt_num(kg)} kg"
+
+
+NOTES_MAX_CHARS = 400
+NOTES_TRUNCATION = " [...]"
+_NOTES_NOISE_PREFIXES = ("contributed by:", "punkapi id:")
+
+
+def _clean_notes(notes: str) -> str:
+    """First useful paragraph of NOTES, noise stripped and length-capped.
+
+    BeerXML exports (PunkAPI/DIY Dog) carry contributor/api metadata lines
+    and a title paragraph repeating the beer name; both add no brewing
+    information and eat the chunk budget.
+    """
+    lines = [
+        line.strip()
+        for line in notes.splitlines()
+        if not line.strip().lower().startswith(_NOTES_NOISE_PREFIXES)
+    ]
+    paragraphs = [
+        " ".join(p.split()) for p in "\n".join(lines).split("\n\n") if p.strip()
+    ]
+    # Drop a leading bare title ("Brewdog 10 Heads High") when real text follows.
+    while (
+        len(paragraphs) > 1
+        and len(paragraphs[0]) < 80
+        and not paragraphs[0].rstrip().endswith((".", "!", "?"))
+    ):
+        paragraphs.pop(0)
+    if not paragraphs:
+        return ""
+    text = paragraphs[0]
+    if len(text) > NOTES_MAX_CHARS:
+        text = text[:NOTES_MAX_CHARS].rsplit(" ", 1)[0].rstrip() + NOTES_TRUNCATION
+    return text
+
+
 def render_recipe(recipe: ET.Element) -> tuple[str, str, str]:
     """BeerXML <RECIPE> -> (markdown text, recipe name, style name).
 
     Renders the fields a home brewer asks about: style, batch stats,
-    fermentables, hop schedule, yeast, notes. Kept compact so one recipe
-    stays one chunk (length guard added in Step 5).
+    fermentables, hop schedule, yeast, notes. Amounts follow BeerXML (kg)
+    and are rendered as kg/g; zero-valued placeholders are omitted. Kept
+    compact so one recipe stays one chunk; the ingest guard is the backstop.
     """
     name = _el_text(recipe, "NAME")
     style_el = recipe.find("STYLE")
@@ -128,7 +207,7 @@ def render_recipe(recipe: ET.Element) -> tuple[str, str, str]:
 
     lines = [f"# {name or 'Unnamed recipe'} (recipe)", ""]
     if style:
-        suffix = f" ({number}{letter})" if number else ""
+        suffix = f" ({number}{letter})" if _positive(number) else ""
         lines += [f"Style: {style}{suffix}", ""]
 
     facts = []
@@ -138,19 +217,19 @@ def render_recipe(recipe: ET.Element) -> tuple[str, str, str]:
         ("BOIL_TIME", " min"),
         ("EFFICIENCY", "%"),
     ):
-        value = _el_text(recipe, tag)
-        if value:
-            facts.append(f"{tag.replace('_', ' ').lower()} {value}{unit}")
+        value = _positive(_el_text(recipe, tag))
+        if value is not None:
+            facts.append(f"{tag.replace('_', ' ').lower()} {_fmt_num(value)}{unit}")
     for tag in ("OG", "FG", "IBU"):
-        value = _el_text(recipe, tag)
-        if value:
-            facts.append(f"{tag} {value}")
-    abv = _el_text(recipe, "ABV")
-    if abv:
-        facts.append(f"ABV {abv}%")
-    color = _el_text(recipe, "COLOR")
-    if color:
-        facts.append(f"COLOR {color} SRM")
+        value = _positive(_el_text(recipe, tag))
+        if value is not None:
+            facts.append(f"{tag} {_fmt_num(value)}")
+    abv = _positive(_el_text(recipe, "ABV"))
+    if abv is not None:
+        facts.append(f"ABV {_fmt_num(abv)}%")
+    color = _positive(_el_text(recipe, "COLOR"))
+    if color is not None:
+        facts.append(f"COLOR {_fmt_num(color)} SRM")
     if facts:
         lines += [", ".join(facts), ""]
 
@@ -159,12 +238,12 @@ def render_recipe(recipe: ET.Element) -> tuple[str, str, str]:
         lines += ["## Fermentables"]
         for f in fermentables:
             fields = [_el_text(f, "NAME") or "unnamed"]
-            amount = _el_text(f, "AMOUNT")
-            if amount:
-                fields.append(f"{amount} g")
-            fcolor = _el_text(f, "COLOR")
-            if fcolor:
-                fields.append(f"{fcolor} SRM")
+            amount = _positive(_el_text(f, "AMOUNT"))
+            if amount is not None:
+                fields.append(_fmt_amount(amount))
+            fcolor = _positive(_el_text(f, "COLOR"))
+            if fcolor is not None:
+                fields.append(f"{_fmt_num(fcolor)} SRM")
             lines.append("- " + ", ".join(fields))
         lines.append("")
 
@@ -173,16 +252,18 @@ def render_recipe(recipe: ET.Element) -> tuple[str, str, str]:
         lines += ["## Hops"]
         for h in hops:
             fields = [_el_text(h, "NAME") or "unnamed"]
-            amount = _el_text(h, "AMOUNT")
-            if amount:
-                fields.append(f"{amount} g")
+            amount = _positive(_el_text(h, "AMOUNT"))
+            if amount is not None:
+                fields.append(_fmt_amount(amount))
             use = _el_text(h, "USE")
-            time_min = _el_text(h, "TIME")
-            if use:
-                fields.append(f"{use.lower()} {time_min} min" if time_min else use.lower())
-            alpha = _el_text(h, "ALPHA")
-            if alpha:
-                fields.append(f"alpha {alpha}%")
+            time_min = _positive(_el_text(h, "TIME"))
+            if use and time_min is not None:
+                fields.append(f"{use.lower()} {_fmt_num(time_min)} min")
+            elif use:
+                fields.append(use.lower())
+            alpha = _positive(_el_text(h, "ALPHA"))
+            if alpha is not None:
+                fields.append(f"alpha {_fmt_num(alpha)}%")
             lines.append("- " + ", ".join(fields))
         lines.append("")
 
@@ -194,13 +275,13 @@ def render_recipe(recipe: ET.Element) -> tuple[str, str, str]:
             form = _el_text(y, "FORM")
             if form:
                 fields.append(form.lower())
-            atten = _el_text(y, "ATTENUATION")
-            if atten:
-                fields.append(f"attenuation {atten}%")
+            atten = _positive(_el_text(y, "ATTENUATION"))
+            if atten is not None:
+                fields.append(f"attenuation {_fmt_num(atten)}%")
             lines.append("- " + ", ".join(fields))
         lines.append("")
 
-    notes = _el_text(recipe, "NOTES")
+    notes = _clean_notes(_el_text(recipe, "NOTES"))
     if notes:
         lines += ["## Notes", notes]
 
@@ -323,11 +404,34 @@ def load_documents(data_dirs: list[Path]) -> list[Document]:
     return docs
 
 
+def cap_entity_text(text: str) -> tuple[str, bool]:
+    """Bound a never-split entity; returns (text, was_capped).
+
+    Prefers cutting at the last section boundary (``\\n## ``) in the second
+    half of the budget so a style doc keeps whole sections; falls back to the
+    last newline, then to a hard cut. The truncation marker tells the model
+    (and the reader) that the document continues.
+    """
+    if len(text) <= MAX_ENTITY_CHARS:
+        return text, False
+    # Reserve room for the marker so the final chunk never exceeds the guard.
+    budget = MAX_ENTITY_CHARS - len(TRUNCATION_NOTE)
+    cut = text[:budget]
+    idx = cut.rfind("\n## ")
+    if idx >= budget // 2:
+        cut = cut[:idx]
+    else:
+        nl = cut.rfind("\n")
+        cut = cut[:nl] if nl > 0 else cut
+    return cut.rstrip() + TRUNCATION_NOTE, True
+
+
 def chunk_documents(docs: list[Document]) -> tuple[list[Document], int]:
     """Chunk docs by entity type; returns (chunks, n_docs_split).
 
-    Types in NOSPLIT_TYPES stay whole (the entity IS the chunk); everything
-    else goes through the text splitter (split only if oversized).
+    Types in NOSPLIT_TYPES stay whole (the entity IS the chunk), bounded by
+    ``MAX_ENTITY_CHARS`` with ``truncated``/``chars`` metadata when capped;
+    everything else goes through the text splitter (split only if oversized).
     """
     splitter = RecursiveCharacterTextSplitter(
         chunk_size=CHUNK_SIZE, chunk_overlap=CHUNK_OVERLAP
@@ -336,7 +440,20 @@ def chunk_documents(docs: list[Document]) -> tuple[list[Document], int]:
     n_split = 0
     for doc in docs:
         if doc.metadata.get("type") in NOSPLIT_TYPES:
-            chunks.append(doc)
+            text, capped = cap_entity_text(doc.page_content)
+            if capped:
+                chunks.append(
+                    Document(
+                        page_content=text,
+                        metadata={
+                            **doc.metadata,
+                            "truncated": True,
+                            "chars": len(doc.page_content),
+                        },
+                    )
+                )
+            else:
+                chunks.append(doc)
             continue
         parts = splitter.split_documents([doc])
         if len(parts) > 1:
@@ -386,7 +503,13 @@ def main() -> None:
     counts: dict[str, int] = {}
     for d in chunks:
         counts[d.metadata["type"]] = counts.get(d.metadata["type"], 0) + 1
-    print("By type: " + ", ".join(f"{t}={n}" for t, n in sorted(counts.items())))
+    capped = sum(1 for d in chunks if d.metadata.get("truncated"))
+    longest = max(len(d.page_content) for d in chunks)
+    print(
+        "By type: "
+        + ", ".join(f"{t}={n}" for t, n in sorted(counts.items()))
+        + f" | capped={capped} at {MAX_ENTITY_CHARS} chars | longest={longest}"
+    )
 
 
 if __name__ == "__main__":

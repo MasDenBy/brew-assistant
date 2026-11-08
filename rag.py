@@ -65,11 +65,16 @@ def _get_vectorstore() -> Chroma:
 
 
 def get_llm(model: str | None = None, temperature: float | None = None) -> ChatOllama:
-    """Build the chat model from config (or explicit overrides from the UI)."""
+    """Build the chat model from config (or explicit overrides from the UI).
+
+    ``num_ctx`` comes from config so the retrieved context (top_k chunks of
+    up to 2600 chars) plus chat history fits the model's window.
+    """
     cfg = load_config()
     return ChatOllama(
         model=model or cfg["model"],
         temperature=cfg["temperature"] if temperature is None else temperature,
+        num_ctx=cfg["num_ctx"],
     )
 
 

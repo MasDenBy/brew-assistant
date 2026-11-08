@@ -3,6 +3,7 @@
 model: qwen2.5:7b
 temperature: 0.3
 top_k: 6                             # Phase 2: raised 4 -> 6 (store grows 5x+)
+num_ctx: 8192                        # Ollama context window: 6 x 2600-char chunks fit with history headroom
 data_dir: data                        # legacy single-dir key (tests/older scripts)
 data_dirs:                            # ingest reads fixtures + collected data
   - data                              # repo fixtures (+ self-authored CSV tables) — chat works without collectors

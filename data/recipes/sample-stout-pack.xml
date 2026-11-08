@@ -25,7 +25,7 @@
       <FERMENTABLE>
         <NAME>Maris Otter</NAME>
         <VERSION>1</VERSION>
-        <AMOUNT>4000</AMOUNT>
+        <AMOUNT>4.0</AMOUNT>
         <YIELD>80</YIELD>
         <COLOR>4</COLOR>
         <TYPE>Grain</TYPE>
@@ -33,7 +33,7 @@
       <FERMENTABLE>
         <NAME>Roasted Barley</NAME>
         <VERSION>1</VERSION>
-        <AMOUNT>400</AMOUNT>
+        <AMOUNT>0.4</AMOUNT>
         <YIELD>70</YIELD>
         <COLOR>500</COLOR>
         <TYPE>Grain</TYPE>
@@ -44,7 +44,7 @@
         <NAME>Fuggle</NAME>
         <VERSION>1</VERSION>
         <ALPHA>4.5</ALPHA>
-        <AMOUNT>40</AMOUNT>
+        <AMOUNT>0.04</AMOUNT>
         <USE>Boil</USE>
         <TIME>60</TIME>
       </HOP>
@@ -85,7 +85,7 @@
       <FERMENTABLE>
         <NAME>Pale 2-Row</NAME>
         <VERSION>1</VERSION>
-        <AMOUNT>4200</AMOUNT>
+        <AMOUNT>4.2</AMOUNT>
         <YIELD>78</YIELD>
         <COLOR>3</COLOR>
         <TYPE>Grain</TYPE>
@@ -93,7 +93,7 @@
       <FERMENTABLE>
         <NAME>Flaked Oats</NAME>
         <VERSION>1</VERSION>
-        <AMOUNT>750</AMOUNT>
+        <AMOUNT>0.75</AMOUNT>
         <YIELD>70</YIELD>
         <COLOR>2</COLOR>
         <TYPE>Grain</TYPE>
@@ -101,7 +101,7 @@
       <FERMENTABLE>
         <NAME>Chocolate Malt</NAME>
         <VERSION>1</VERSION>
-        <AMOUNT>300</AMOUNT>
+        <AMOUNT>0.3</AMOUNT>
         <YIELD>68</YIELD>
         <COLOR>350</COLOR>
         <TYPE>Grain</TYPE>
@@ -109,7 +109,7 @@
       <FERMENTABLE>
         <NAME>Crystal 60L</NAME>
         <VERSION>1</VERSION>
-        <AMOUNT>300</AMOUNT>
+        <AMOUNT>0.3</AMOUNT>
         <YIELD>74</YIELD>
         <COLOR>60</COLOR>
         <TYPE>Grain</TYPE>
@@ -120,7 +120,7 @@
         <NAME>Kent Goldings</NAME>
         <VERSION>1</VERSION>
         <ALPHA>4.0</ALPHA>
-        <AMOUNT>35</AMOUNT>
+        <AMOUNT>0.035</AMOUNT>
         <USE>Boil</USE>
         <TIME>60</TIME>
       </HOP>

@@ -188,8 +188,13 @@ brew-assistant/
 
 ### Step 6 — Chunking by entity type (~0.5 day)
 - Per-type strategy: `recipe`, `bjcp_style`, table rows → no split (entity = chunk, length guard); `.md` → existing splitter only when oversized.
-- Recipe renderer caps detail so one recipe fits one chunk (full hop schedule + fermentables; truncate mash/notes first).
-- Extend the ingest summary to per-type counts.
+- Length guard: never-split entities are capped at **2600 chars** (`MAX_ENTITY_CHARS`). Cut prefers the last `\n## ` section boundary in the second half of the budget (whole sections kept), else the last newline; the truncation marker tells the model the document continues. Capped chunks carry `truncated: True` + `chars: <original length>`; ingest summary reports `capped=… / longest=…`.
+  - Measured on the 1,285-doc store: **75/110 BJCP docs capped**, longest chunk 2,592, recipes/hops/malts/yeasts untouched. Data-driven: the embedder (`all-MiniLM-L6-v2`, 256 tokens) only sees ~the first 1,000 chars anyway.
+  - Accepted loss (Step 8 eval context): capped BJCP docs lose their tail — all 75 capped docs drop `Examples`, while `Flavor` survives in 68 and `Comparison with other styles` in 52 of them; no current eval row depends on truncated content.
+- Recipe renderer fixes (BeerXML conformance): `AMOUNT` is **kg** → rendered `4.38 kg` (grams below 1 kg: `0.02 kg → 20 g`) instead of the old 1000×-off `g`; zero placeholders (`OG 0.0`, `FG 0.0`, `(0)` style number, zero hop time/colour/attenuation) are suppressed; notes are reduced to the first useful paragraph, stripped of `Contributed by:` / `PunkAPI id:` lines, and capped at 400 chars; full fermentable + hop schedule kept (guard is the backstop).
+- Prompt budget: `config.yaml: num_ctx: 8192`, passed to `ChatOllama` by `rag.get_llm()` — 6 × 2600-char chunks fit with history headroom. Verified `qwen2.5:7b` stays 100% GPU-resident (`ollama ps`: 5.1 GB, context 8192).
+- Fixtures: `data/recipes/sample-*.xml` converted to conformant kg amounts; contract assertions updated.
+- Verification: 1,285 chunks / 0 splits / `capped=75` / `longest=2592`; smoke_ingest, smoke_retrieval, smoke_rag green; `run_eval.py` unchanged at 11 pass / 0 fail / 2 manual.
 
 ### Step 7 — Retrieval filter + UI (~0.5 day)
 - `rag.retrieve(query, k, types=None)` → Chroma filter `{"type": {"$in": types}}`; thread through `get_retrieved_sources`.

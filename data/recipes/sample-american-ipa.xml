@@ -25,7 +25,7 @@
       <FERMENTABLE>
         <NAME>Pale 2-Row</NAME>
         <VERSION>1</VERSION>
-        <AMOUNT>4500</AMOUNT>
+        <AMOUNT>4.5</AMOUNT>
         <YIELD>78</YIELD>
         <COLOR>3</COLOR>
         <TYPE>Grain</TYPE>
@@ -33,7 +33,7 @@
       <FERMENTABLE>
         <NAME>Crystal 40L</NAME>
         <VERSION>1</VERSION>
-        <AMOUNT>250</AMOUNT>
+        <AMOUNT>0.25</AMOUNT>
         <YIELD>74</YIELD>
         <COLOR>40</COLOR>
         <TYPE>Grain</TYPE>
@@ -44,7 +44,7 @@
         <NAME>Cascade</NAME>
         <VERSION>1</VERSION>
         <ALPHA>5.5</ALPHA>
-        <AMOUNT>40</AMOUNT>
+        <AMOUNT>0.04</AMOUNT>
         <USE>Boil</USE>
         <TIME>60</TIME>
       </HOP>
@@ -52,7 +52,7 @@
         <NAME>Cascade</NAME>
         <VERSION>1</VERSION>
         <ALPHA>5.5</ALPHA>
-        <AMOUNT>60</AMOUNT>
+        <AMOUNT>0.06</AMOUNT>
         <USE>Whirlpool</USE>
         <TIME>20</TIME>
       </HOP>
