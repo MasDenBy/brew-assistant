@@ -20,6 +20,7 @@ from collectors import discover  # noqa: E402
 from collectors.base import (  # noqa: E402
     DataCollector,
     SourceUnavailableError,
+    all_registered,
     register,
 )
 from collectors.runner import FAIL, MISSING, OK, SKIP, run  # noqa: E402
@@ -33,6 +34,16 @@ from collectors.whitelabs_collector import (  # noqa: E402
     strain_filename,
     strain_links,
     write_documents,
+)
+import collectors.wyeast_collector as wyeast_collector  # noqa: E402
+from collectors.wyeast_collector import (  # noqa: E402
+    Strain as WyeastStrain,
+    WyeastCollector,
+    parse_strain as parse_wyeast_strain,
+    product_urls,
+    render_strain as render_wyeast_strain,
+    strain_filename as wyeast_filename,
+    write_documents as write_wyeast_documents,
 )
 
 
@@ -468,11 +479,321 @@ def main() -> None:
             whitelabs_collector.fetch_text = original_fetch
         assert kept.is_file(), "fail-soft run wiped previously collected files"
 
+        # --- wyeast: synthetic sitemap + product page, no network ---
+        sitemap_xml = (
+            b'<?xml version="1.0" encoding="UTF-8"?>'
+            b'<urlset xmlns="http://www.sitemaps.org/schemas/sitemap/0.9">'
+            b"<url><loc>https://wyeastlab.com/our-products/</loc></url>"
+            b"<url><loc>https://wyeastlab.com/product/alpha/</loc></url>"
+            b"<url><loc>https://wyeastlab.com/product/beta/</loc></url>"
+            b"<url><loc>https://wyeastlab.com/product/alpha/</loc></url>"
+            b"<url><loc>https://wyeastlab.com/style/weissbier/</loc></url>"
+            b"<url><loc>https://wyeastlab.com/product/gamma/</loc></url>"
+            b"</urlset>"
+        )
+        urls = product_urls(sitemap_xml)
+        assert urls == [
+            "https://wyeastlab.com/product/alpha/",
+            "https://wyeastlab.com/product/beta/",
+            "https://wyeastlab.com/product/gamma/",
+        ], urls
+        # garbage does not crash the helper; the collector turns it into SKIP
+        assert product_urls(b"<html>not xml</html>") == []
+
+        beer_html = """
+        <html><head>
+          <title>Strain: 3068 | Wyeast</title>
+          <style>.leak { color: red; }</style>
+          <script>var secret = 1;</script>
+        </head><body>
+          <h2 class="headline">Strain: 3068</h2>
+          <h3 class="subheadline">Weihenstephan Weizen</h3>
+          <div class="description">
+            <p><strong>Species:</strong>
+               <i>Saccharomyces cerevisiae</i></p>
+            <p><strong>Profile: </strong> The classic and most popular German
+               wheat beer strain used worldwide.
+               <img src="leak.jpg" alt="alt text must not leak">
+               Over pitching can result in a loss of banana character.</p>
+          </div>
+          <div class="tabs js-product-tabs">
+            <h3 class="tabs-title">Used in:</h3>
+            <div class="tabs-nav">
+              <div class="tab-nav-item accent-color-orange-dark is-active">
+                <div class="icon"><img src="icon-beer.svg" alt="Beer"></div>
+                <span>Beer</span>
+              </div>
+            </div>
+            <div class="tabs-content">
+              <div class="tab-content is-active">
+                <ul class="features">
+                  <li><h6>Flocculation</h6><span>Low</span></li>
+                  <li><h6>Apparent Attenuation</h6><span>73 - 77%</span></li>
+                  <li><h6>Apparent ABV Tolerance</h6><span>10%</span></li>
+                  <li><h6>Temperature Range</h6><span>64-75°F (18-24°C)</span></li>
+                </ul>
+              </div>
+            </div>
+          </div>
+          <section class="content-block template-related-styles">
+            <header class="template-header">
+              <p class="preheadline">Recommended for Styles</p>
+            </header>
+            <div class="grid-x block-grid">
+              <div class="cell"><div class="inner"><div class="content">
+                <h3 class="title">Weissbier</h3>
+                <h4 class="subtitle">Wheat</h4>
+              </div></div></div>
+              <div class="cell"><div class="inner"><div class="content">
+                <h3 class="title">Dunkles Weissbier</h3>
+              </div></div></div>
+              <div class="cell"><div class="inner"><div class="content">
+                <h3 class="title">Weizenbock</h3>
+              </div></div></div>
+            </div>
+          </section>
+          <header class="module"><h2 class="headline">Let’s get brewing.</h2></header>
+          <script>var trailing = 3;</script>
+        </body></html>
+        """
+        beer = parse_wyeast_strain(
+            beer_html, source_url="https://wyeastlab.com/product/weihenstephan-weizen/"
+        )
+        assert beer is not None
+        assert beer.part == "3068", beer.part
+        assert beer.name == "Weihenstephan Weizen", beer.name
+        assert beer.species == "Saccharomyces cerevisiae", beer.species
+        assert "classic and most popular" in beer.profile, beer.profile
+        assert "alt text" not in beer.profile, beer.profile
+        assert "secret" not in beer.profile, beer.profile
+        assert "<" not in beer.profile, beer.profile
+        assert beer.used_in == ["Beer"], beer.used_in
+        assert beer.specs["FLOCCULATION"] == "Low", beer.specs
+        assert beer.specs["APPARENT ATTENUATION"] == "73 - 77%", beer.specs
+        assert beer.specs["APPARENT ABV TOLERANCE"] == "10%", beer.specs
+        assert (
+            beer.specs["TEMPERATURE RANGE"] == "18–24 °C (64–75 °F)"
+        ), beer.specs["TEMPERATURE RANGE"]
+        assert beer.styles == [
+            "Weissbier",
+            "Dunkles Weissbier",
+            "Weizenbock",
+        ], beer.styles
+
+        # multi-beverage page: repeated feature lists dedupe, labels accumulate
+        multi_html = """
+        <h2 class="headline">Strain: 4766</h2>
+        <h3 class="subheadline">Cider</h3>
+        <div class="description">
+          <p><strong>Species:</strong> <i>Saccharomyces cerevisiae</i></p>
+          <p><strong>Profile: </strong> Crisp and dry fermenting yeast.</p>
+        </div>
+        <div class="tabs js-product-tabs">
+          <h3 class="tabs-title">Used in:</h3>
+          <div class="tabs-nav">
+            <div class="tab-nav-item"><div class="icon"><img alt="Cider"></div>
+              <span>Cider</span></div>
+            <div class="tab-nav-item"><div class="icon"><img alt="Mead"></div>
+              <span>Mead</span></div>
+          </div>
+          <div class="tabs-content">
+            <div class="tab-content is-active"><ul class="features">
+              <li><h6>Flocculation</h6><span>Low</span></li>
+              <li><h6>Apparent ABV Tolerance</h6><span>12%</span></li>
+              <li><h6>Temperature Range</h6><span>60-75°F (16-24°C)</span></li>
+            </ul></div>
+            <div class="tab-content"><ul class="features">
+              <li><h6>Flocculation</h6><span>Low</span></li>
+              <li><h6>Apparent ABV Tolerance</h6><span>12%</span></li>
+              <li><h6>Temperature Range</h6><span>60-75°F (16-24°C)</span></li>
+            </ul></div>
+          </div>
+        </div>
+        """
+        multi = parse_wyeast_strain(multi_html)
+        assert multi is not None
+        assert multi.used_in == ["Cider", "Mead"], multi.used_in
+        assert len(multi.specs) == 3, multi.specs
+        multi_doc = render_wyeast_strain(multi)
+        assert multi_doc.count("- Flocculation:") == 1, multi_doc
+        assert multi_doc.count("- Recommended temperature:") == 1, multi_doc
+        assert "**Used in:** Cider, Mead" in multi_doc, multi_doc
+
+        # non-culture product: no "Strain:" headline -> skipped
+        brewtan_html = """
+        <h2 class="headline">Wyeast Brewtan B</h2>
+        <div class="description"><p>A tannic acid product, not a culture.</p></div>
+        """
+        assert parse_wyeast_strain(brewtan_html) is None
+
+        # bacteria culture: kept, species-aware Type line, yeast- bucket filename
+        bacteria_html = """
+        <h2 class="headline">Strain: 5335</h2>
+        <h3 class="subheadline">Lactobacillus buchneri</h3>
+        <div class="description">
+          <p><strong>Species:</strong> <i>Lactobacillus buchneri</i></p>
+          <p><strong>Profile: </strong> Produces moderate levels of acidity.</p>
+        </div>
+        <div class="tabs js-product-tabs">
+          <div class="tabs-nav">
+            <div class="tab-nav-item"><span>Beer</span></div>
+          </div>
+          <div class="tabs-content"><div class="tab-content"><ul class="features">
+            <li><h6>Flocculation</h6><span>Low - High</span></li>
+            <li><h6>Temperature Range</h6><span>60-95°F (16-35°C)</span></li>
+          </ul></div></div>
+        </div>
+        """
+        bacteria = parse_wyeast_strain(bacteria_html)
+        assert bacteria is not None
+        assert bacteria.species == "Lactobacillus buchneri", bacteria.species
+        bacteria_doc = render_wyeast_strain(bacteria)
+        assert "**Type:** Ingredient (Bacteria culture)" in bacteria_doc, bacteria_doc
+        assert "**Species:** Lactobacillus buchneri" in bacteria_doc, bacteria_doc
+        assert (
+            wyeast_filename(bacteria) == "yeast-5335-lactobacillus-buchneri.md"
+        ), wyeast_filename(bacteria)
+
+        # rendering: retrieval-first layout, one chunk, no raw HTML
+        doc = render_wyeast_strain(beer)
+        assert doc.startswith("# 3068 Weihenstephan Weizen (Wyeast)"), doc[:60]
+        assert "**Type:** Ingredient (Yeast)" in doc
+        assert "**Lab:** Wyeast Laboratories" in doc
+        assert "**Product:** 3068" in doc
+        assert "**Species:** Saccharomyces cerevisiae" in doc
+        assert "**Used in:** Beer" in doc
+        assert "**Availability:**" not in doc, doc
+        for bullet in (
+            "- Flocculation: Low",
+            "- Apparent attenuation: 73 - 77%",
+            "- Apparent ABV tolerance: 10%",
+            "- Recommended temperature: 18–24 °C (64–75 °F)",
+        ):
+            assert bullet in doc, f"missing bullet {bullet!r}"
+        assert (
+            "## Suggested Styles\nWeissbier, Dunkles Weissbier, Weizenbock" in doc
+        ), doc
+        assert "## Profile" in doc and "classic and most popular" in doc
+        assert "<" not in doc, f"raw HTML leaked: {doc!r}"
+        assert doc.endswith("\n") and not doc.endswith("\n\n")
+        assert all(line == line.rstrip() for line in doc.splitlines()), "trailing whitespace"
+        assert len(doc) <= 1900, f"doc exceeds the one-chunk budget: {len(doc)}"
+
+        # private collection: -PC suffix adds an availability line
+        pc = WyeastStrain(part="2035-PC", name="American Lager")
+        pc_doc = render_wyeast_strain(pc)
+        assert "# 2035-PC American Lager (Wyeast)" in pc_doc, pc_doc
+        assert "**Availability:** Private Collection (seasonal release)" in pc_doc, pc_doc
+        assert "**Product:** 2035-PC" in pc_doc, pc_doc
+
+        # long profiles are truncated to stay inside one ingest chunk
+        long_doc = render_wyeast_strain(
+            WyeastStrain(
+                part="9999",
+                name="Long Profile",
+                species="Saccharomyces cerevisiae",
+                profile="A long profile sentence. " * 300,
+            )
+        )
+        assert len(long_doc) <= 1900, len(long_doc)
+        assert long_doc.endswith(" …\n"), long_doc[-40:]
+
+        # filenames: yeast- prefix is the ingest contract; ASCII slugs
+        assert (
+            wyeast_filename(WyeastStrain(part="3068", name="Weihenstephan Weizen"))
+            == "yeast-3068-weihenstephan-weizen.md"
+        )
+        assert (
+            wyeast_filename(WyeastStrain(part="2035-PC", name="American Lager"))
+            == "yeast-2035-pc-american-lager.md"
+        )
+        assert (
+            wyeast_filename(WyeastStrain(part="2575-PC", name="Kölsch II"))
+            == "yeast-2575-pc-kolsch-ii.md"
+        )
+        assert (
+            wyeast_filename(WyeastStrain(part="5335", name="Lactobacillus buchneri"))
+            == "yeast-5335-lactobacillus-buchneri.md"
+        )
+
+        # write_documents: clears its own subtree, writes only ingredients/
+        wy_dest = tmp / "wyeast_write"
+        (wy_dest / "ingredients").mkdir(parents=True, exist_ok=True)
+        wy_stale = wy_dest / "ingredients" / "yeast-stale.md"
+        wy_stale.write_text("old", encoding="utf-8")
+        wy_written = write_wyeast_documents({"yeast-x.md": "# X\n"}, wy_dest)
+        assert len(wy_written) == 1 and wy_written[0].is_file()
+        assert not wy_stale.exists(), "stale file survived re-run"
+        assert wy_written[0].parent == wy_dest / "ingredients", wy_written[0]
+        assert [p.name for p in wy_dest.iterdir()] == ["ingredients"]
+
+        # collector success path: sitemap -> pages, non-culture product skipped
+        live_dest = tmp / "wyeast_live"
+        pages = {
+            "https://wyeastlab.com/product/alpha/": beer_html,
+            "https://wyeastlab.com/product/beta/": brewtan_html,
+            "https://wyeastlab.com/product/gamma/": bacteria_html,
+        }
+        original_wy_fetch = wyeast_collector.fetch
+        original_wy_fetch_text = wyeast_collector.fetch_text
+        wyeast_collector.fetch = lambda url, **kwargs: sitemap_xml
+        wyeast_collector.fetch_text = lambda url, **kwargs: pages[url]
+        try:
+            live_written = WyeastCollector().collect(live_dest)
+        finally:
+            wyeast_collector.fetch = original_wy_fetch
+            wyeast_collector.fetch_text = original_wy_fetch_text
+        assert len(live_written) == 2, live_written
+        assert (
+            live_dest / "ingredients" / "yeast-3068-weihenstephan-weizen.md"
+        ).is_file()
+        assert (
+            live_dest / "ingredients" / "yeast-5335-lactobacillus-buchneri.md"
+        ).is_file()
+
+        # fail soft: sitemap down / garbage / every page failing; old output kept
+        wy_soft_dest = tmp / "wyeast_soft"
+        wy_kept = wy_soft_dest / "ingredients" / "yeast-keep.md"
+        wy_kept.parent.mkdir(parents=True, exist_ok=True)
+        wy_kept.write_text("# keep\n", encoding="utf-8")
+
+        def _offline_fetch(url, **kwargs):
+            raise SourceUnavailableError(f"offline: {url}")
+
+        def _garbage_fetch(url, **kwargs):
+            return b"<html>not xml</html>"
+
+        for label, sitemap_fetch, page_fetch in (
+            ("sitemap down", _offline_fetch, original_wy_fetch_text),
+            ("garbage sitemap", _garbage_fetch, original_wy_fetch_text),
+            ("all pages failing", lambda url, **kw: sitemap_xml, _offline_fetch),
+        ):
+            wyeast_collector.fetch = sitemap_fetch
+            wyeast_collector.fetch_text = page_fetch
+            try:
+                try:
+                    WyeastCollector().collect(wy_soft_dest)
+                except SourceUnavailableError:
+                    pass
+                else:
+                    raise AssertionError(
+                        f"{label}: unreachable source must raise SourceUnavailableError"
+                    )
+            finally:
+                wyeast_collector.fetch = original_wy_fetch
+                wyeast_collector.fetch_text = original_wy_fetch_text
+            assert wy_kept.is_file(), f"{label}: fail-soft run wiped prior output"
+
+        # registry
+        assert "wyeast" in all_registered(), all_registered().keys()
+
         print("PASS: registry, runner statuses (OK/SKIP/FAIL/MISSING),")
         print("      namespace rule, HTML -> markdown conversion,")
         print("      diydog zip extraction (idempotent, xml only),")
         print("      bjcp style rendering (sections, type/tags, aliases, payload),")
-        print("      whitelabs strain parsing/rendering (specs, styles, fail-soft)")
+        print("      whitelabs strain parsing/rendering (specs, styles, fail-soft),")
+        print("      wyeast sitemap/culture parsing (multi-tab dedupe, bacteria,")
+        print("      -PC availability, filename/one-chunk contract, fail-soft)")
     finally:
         shutil.rmtree(tmp, ignore_errors=True)
 
