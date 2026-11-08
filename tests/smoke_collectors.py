@@ -24,6 +24,16 @@ from collectors.base import (  # noqa: E402
 )
 from collectors.runner import FAIL, MISSING, OK, SKIP, run  # noqa: E402
 from collectors.web import html_to_markdown  # noqa: E402
+import collectors.whitelabs_collector as whitelabs_collector  # noqa: E402
+from collectors.whitelabs_collector import (  # noqa: E402
+    Strain,
+    WhitelabsCollector,
+    parse_strain,
+    render_strain,
+    strain_filename,
+    strain_links,
+    write_documents,
+)
 
 
 @register
@@ -284,10 +294,185 @@ def main() -> None:
         else:
             raise AssertionError("bad payload must raise SourceUnavailableError")
 
+        # --- whitelabs: synthetic listing + detail page, no network ---
+        listing_html = """
+        <nav><a href="/yeast-bank?page=2">next page</a>
+             <a href="/yeast-compare">compare</a></nav>
+        <ul class="cards">
+          <li><a href="/yeast-single?id=101&amp;type=YEAST">WLP001</a></li>
+          <li><a href="/yeast-single?id=102&amp;type=YEAST">WLP002</a></li>
+          <li><a href="/yeast-single?id=101&amp;type=YEAST">WLP001 again</a></li>
+          <li><a href="/yeast-single?id=900&amp;type=BACTERIA">bacteria</a></li>
+        </ul>
+        """
+        assert strain_links(listing_html) == ["101", "102"], strain_links(listing_html)
+
+        detail_html = """
+        <html><head>
+          <title>WLP001 California Ale Yeast | White Labs</title>
+          <style>.leak { color: red; }</style>
+          <script>var secret = 1;</script>
+        </head><body>
+          <h1>WLP001 California Ale Yeast®</h1>
+          <h2 class="table-title w-h2">ATTENUATION :</h2><p>73% - 85%</p>
+          <h2 class="table-title w-h2">FLOCCULATION :</h2><p>Medium</p>
+          <h2 class="table-title w-h2">ALCOHOL TOLERANCE :</h2><p>Medium (5-10%)</p>
+          <h2 class="table-title w-h2">FERMENTATION TEMPERATURE :</h2>
+            <p>64° - 73° F<br>18° - 23° C</p>
+          <h2 class="table-title w-h2">STA1 :</h2><p>Negative</p>
+          <div class="dynamic-content"><ul><li>Suggested tab, not the profile</li></ul></div>
+          <ul class="details">
+            <li><strong class="w-h3">Part No: </strong>WLP001</li>
+            <li><strong class="w-h3">Part Name: </strong>WLP001 California Ale Yeast®</li>
+            <li><strong class="w-h3">Also Available in Organic: </strong>Yes</li>
+            <li><strong class="w-h3">STA1 QC Result: </strong>Negative</li>
+            <li><strong class="w-h3">Type: </strong>Core</li>
+          </ul>
+          <h2 class="w-h2" style="font-weight:700">Description</h2>
+          <div class="dynamic-content">
+            <p>A clean, <strong>crisp</strong> fermenting yeast.</p>
+            <script>var leaked = 2;</script>
+            <style>.leaked { color: blue; }</style>
+            <img src="leak.jpg" alt="alt text must not leak">
+            <div><p>Great for American ales.</p></div>
+            <p>&nbsp;&nbsp;&nbsp;</p>
+            <p>Another paragraph.</p>
+          </div>
+          <ul class="beer_style">
+            <li> American IPA </li>
+            <li> American Wheat Beer </li>
+            <li> Blonde Ale </li>
+            <li> American IPA </li>
+          </ul>
+          <script>var trailing = 3;</script>
+        </body></html>
+        """
+        strain = parse_strain(
+            detail_html, source_url="https://www.whitelabs.com/yeast-single?id=101&type=YEAST"
+        )
+        assert strain is not None
+        assert strain.name == "WLP001 California Ale Yeast®", strain.name
+        assert strain.part == "WLP001", strain.part
+        assert strain.availability == "Core", strain.availability
+        assert strain.specs["ATTENUATION"] == "73% - 85%", strain.specs
+        assert strain.specs["FLOCCULATION"] == "Medium", strain.specs
+        assert strain.specs["ALCOHOL TOLERANCE"] == "Medium (5-10%)", strain.specs
+        assert strain.specs["STA1"] == "Negative", strain.specs
+        assert (
+            strain.specs["FERMENTATION TEMPERATURE"] == "18–23 °C (64–73 °F)"
+        ), strain.specs["FERMENTATION TEMPERATURE"]
+        assert strain.styles == [
+            "American IPA",
+            "American Wheat Beer",
+            "Blonde Ale",
+        ], strain.styles
+        # only the div after the Description heading is the profile
+        assert "Suggested tab" not in strain.description, strain.description
+        assert "A clean, crisp fermenting yeast." in strain.description, strain.description
+        assert "Great for American ales." in strain.description, strain.description
+        assert "leaked" not in strain.description, strain.description
+        assert "alt text" not in strain.description, strain.description
+        assert "<" not in strain.description, strain.description
+        assert strain.source_url.endswith("id=101&type=YEAST")
+
+        # live pages nest ul.details inside the description container; the
+        # details must still parse and must not leak into the profile text
+        nested = (
+            "<h1>WLP002 English Ale Yeast</h1>"
+            "<h2 class='table-title w-h2'>ATTENUATION :</h2><p>63% - 70%</p>"
+            "<h2>Description</h2>"
+            "<div class='dynamic-content'><p>Profile text.</p>"
+            "<ul class='details'>"
+            "<li><strong class='w-h3'>Part No: </strong>WLP002</li>"
+            "<li><strong class='w-h3'>Type: </strong>Core</li>"
+            "</ul></div>"
+        )
+        nested_strain = parse_strain(nested)
+        assert nested_strain is not None
+        assert nested_strain.part == "WLP002", nested_strain.part
+        assert nested_strain.availability == "Core", nested_strain.availability
+        assert "Profile text." in nested_strain.description, nested_strain.description
+        assert "Part No" not in nested_strain.description, nested_strain.description
+
+        # pages that are not renderable strains
+        assert parse_strain("<html><body><h1>404</h1></body></html>") is None
+        assert parse_strain("<html><body><p>nothing here</p></body></html>") is None
+        product = (
+            "<h1>WLN1000 Yeast Nutrient</h1>"
+            "<div class='dynamic-content'><p>A nutrient, not a strain.</p></div>"
+        )
+        assert parse_strain(product) is None, "non-yeast product must be skipped"
+
+        doc = render_strain(strain)
+        assert doc.startswith("# WLP001 California Ale Yeast® (White Labs)"), doc[:60]
+        assert "**Type:** Ingredient (Yeast)" in doc
+        assert "**Lab:** White Labs" in doc
+        assert "**Product:** WLP001" in doc
+        assert "**Availability:** Core" in doc
+        for bullet in (
+            "- Attenuation: 73% - 85%",
+            "- Flocculation: Medium",
+            "- Alcohol tolerance: Medium (5-10%)",
+            "- Recommended temperature: 18–23 °C (64–73 °F)",
+            "- STA1: Negative",
+        ):
+            assert bullet in doc, f"missing bullet {bullet!r}"
+        assert (
+            "## Suggested Styles\nAmerican IPA, American Wheat Beer, Blonde Ale" in doc
+        ), doc
+        assert "## Profile" in doc and "A clean, crisp" in doc
+        assert "<" not in doc, f"raw HTML leaked: {doc!r}"
+        assert doc.endswith("\n") and not doc.endswith("\n\n")
+        assert all(line == line.rstrip() for line in doc.splitlines()), "trailing whitespace"
+        assert len(doc) <= 1900, f"doc exceeds the one-chunk budget: {len(doc)}"
+
+        # filenames: yeast- prefix is the ingest contract; ASCII slugs
+        assert (
+            strain_filename(strain) == "yeast-wlp001-california-ale-yeast.md"
+        ), strain_filename(strain)
+        voss = Strain(name="LalBrew Voss™", part="WLDVOSS")
+        assert strain_filename(voss) == "yeast-wldvoss-lalbrew-voss.md", strain_filename(voss)
+        melange = Strain(name="WLP585 Mélange", part="WLP585")
+        assert strain_filename(melange) == "yeast-wlp585-melange.md", strain_filename(melange)
+
+        # write_documents: clears its own subtree, writes only ingredients/
+        wl_dest = tmp / "whitelabs_write"
+        (wl_dest / "ingredients").mkdir(parents=True, exist_ok=True)
+        stale = wl_dest / "ingredients" / "yeast-stale.md"
+        stale.write_text("old", encoding="utf-8")
+        written = write_documents({"yeast-x.md": "# X\n"}, wl_dest)
+        assert len(written) == 1 and written[0].is_file()
+        assert not stale.exists(), "stale file survived re-run"
+        assert written[0].parent == wl_dest / "ingredients", written[0]
+        assert [p.name for p in wl_dest.iterdir()] == ["ingredients"]
+
+        # fail soft: an unreachable source raises and preserves old output
+        soft_dest = tmp / "whitelabs_soft"
+        kept = soft_dest / "ingredients" / "yeast-keep.md"
+        kept.parent.mkdir(parents=True, exist_ok=True)
+        kept.write_text("# keep\n", encoding="utf-8")
+        original_fetch = whitelabs_collector.fetch_text
+
+        def _offline(url, **kwargs):
+            raise SourceUnavailableError(f"offline: {url}")
+
+        whitelabs_collector.fetch_text = _offline
+        try:
+            try:
+                WhitelabsCollector().collect(soft_dest)
+            except SourceUnavailableError:
+                pass
+            else:
+                raise AssertionError("unreachable source must raise SourceUnavailableError")
+        finally:
+            whitelabs_collector.fetch_text = original_fetch
+        assert kept.is_file(), "fail-soft run wiped previously collected files"
+
         print("PASS: registry, runner statuses (OK/SKIP/FAIL/MISSING),")
         print("      namespace rule, HTML -> markdown conversion,")
         print("      diydog zip extraction (idempotent, xml only),")
-        print("      bjcp style rendering (sections, type/tags, aliases, payload)")
+        print("      bjcp style rendering (sections, type/tags, aliases, payload),")
+        print("      whitelabs strain parsing/rendering (specs, styles, fail-soft)")
     finally:
         shutil.rmtree(tmp, ignore_errors=True)
 
