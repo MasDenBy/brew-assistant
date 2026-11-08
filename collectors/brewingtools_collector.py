@@ -1,13 +1,23 @@
-"""brewing.tools open ingredient database (hops) -> one markdown doc per variety.
+"""brewing.tools open ingredient database (hops + fermentables) -> markdown docs.
 
-Source: https://brewing.tools/data/hops.json -- a single JSON document (no HTML),
-123 hop varieties, ODbL 1.0, generated 2026-09-28. Every record names the
-manufacturer document it was transcribed from (Hopsteiner / John I. Haas /
-Hop Products Australia / Crosby Hops / BarthHaas).
+Source: the brewing.tools open ingredient database -- two JSON documents from
+one dataset version (0.7.0), ODbL 1.0:
+
+* ``https://brewing.tools/data/hops.json`` -- 123 hop varieties.
+* ``https://brewing.tools/data/fermentables.json`` -- 383 malt/adjunct records,
+  of which the 2 liquid ``extract`` records are excluded by decision, leaving
+  381 rendered malts.
+
+Every record names the manufacturer document it was transcribed from
+(Hopsteiner / John I. Haas / Hop Products Australia / Crosby Hops / BarthHaas /
+Weyermann / Simpsons / Briess / ...).
 
 Naming convention: this module is ``brewingtools_collector.py`` and its registry
 id is ``brewingtools`` -- ``<resource>_collector.py`` with ``id = "<resource>"``
 (see ``collectors/base.py``). Namespace: ``collect_dest/brewingtools/``.
+
+The malt dataset publishes no substitutes, no pairings and no PPG, so malt docs
+carry only what the dataset publishes -- nothing is derived or converted.
 
 Why not beerMaverick: https://beermaverick.com/hops/ is behind a Cloudflare
 managed challenge (HTTP 403, ``Cf-Mitigated: challenge``) for every path,
@@ -21,8 +31,9 @@ brewing.tools under ODbL 1.0. Rendered files are written to ``collect_dest``
 share-alike applies to derived *databases*, not to answers or recipes produced
 from them.
 
-Output contract (collectors/base.py): ``dest/ingredients/hop-<id>.md``
-(``ingest.infer_type()`` classifies by the ``hop-`` filename prefix).
+Output contract (collectors/base.py): ``dest/ingredients/hop-<id>.md`` and
+``dest/ingredients/malt-<id>.md`` (``ingest.infer_type()`` classifies by the
+``hop-`` / ``malt-`` filename prefix).
 """
 from __future__ import annotations
 
@@ -37,14 +48,17 @@ from .base import DataCollector, SourceUnavailableError, register
 from .web import fetch
 
 SOURCE_URL = "https://brewing.tools/data/hops.json"
+FERMENTABLES_URL = "https://brewing.tools/data/fermentables.json"
 DATASET_LABEL = "brewing.tools open ingredient database"
 DATASET_PAGE = "https://brewing.tools/charts"
 DEFAULT_VERSION = "0.7.0"
-MIN_RECORDS = 50          # sanity floor: real dataset has 123
+MIN_RECORDS = 50          # hops sanity floor: real dataset has 123
+MIN_MALT_RECORDS = 200    # malts sanity floor: real filtered count is 381
 MAX_DOC_CHARS = 1900      # ingest CHUNK_SIZE is 2000
 PROFILE_MAX_CHARS = 700   # pedigree/notes budget
 MAX_SUBSTITUTES = 12
 MAX_AROMA = 12
+MAX_ALIASES = 6           # max aliases in the real data is 2
 
 OIL_ORDER = (
     ("myrcenePercent", "myrcene"),
@@ -61,6 +75,26 @@ RANGE_KEYS = (
     ("beta", "betaAcidPercent"),
     ("cohumulone", "cohumulonePercentOfAlpha"),
     ("oil", "totalOilMlPer100g"),
+)
+
+#: Malt.ranges key -> dataset field (published units only, never converted)
+MALT_RANGE_KEYS = (
+    ("colour_l", "colourLovibond"),
+    ("colour_ebc", "colourEbc"),
+    ("extract", "extractFineGrindDryPercent"),
+    ("moisture", "moisturePercent"),
+    ("max_batch", "maxInBatchPercent"),
+    ("protein", "proteinPercent"),
+    ("total_nitrogen", "totalNitrogenPercent"),
+    ("soluble_n_ratio", "solubleNitrogenRatioPercent"),
+    ("coarse_extract", "extractCoarseGrindDryPercent"),
+    ("coarse_fine_diff", "coarseFineDifferencePercent"),
+)
+
+#: Malt.diastatic entries: (label, dataset field)
+MALT_DIASTATIC_KEYS = (
+    ("°Lintner", "diastaticPowerLintner"),
+    ("°WK", "diastaticPowerWindischKolbach"),
 )
 
 _WS_RE = re.compile(r"\s+")
@@ -86,6 +120,27 @@ class Hop:
     document_url: str = ""
     retrieved: str = ""
     dataset_version: str = DEFAULT_VERSION  # payload "version" (rendered in the Source line)
+
+
+@dataclass
+class Malt:
+    """One brewing.tools fermentable record, normalized for rendering."""
+
+    id: str = ""                        # "weyermann-abbey-malt" (dataset slug -> filename)
+    name: str = ""                      # "Abbey Malt®"
+    maltster: str = ""                  # "Weyermann Specialty Malts"
+    origin: str = ""                    # "Germany, EU" (may be "")
+    group: str = ""                     # grainGroup, falling back to dataset type
+    aliases: list[str] = field(default_factory=list)
+    ranges: dict[str, dict] = field(default_factory=dict)
+    diastatic: list[tuple[str, dict]] = field(default_factory=list)  # (label, range)
+    description: str = ""
+    notes: str = ""
+    publisher: str = ""
+    document: str = ""
+    document_url: str = ""
+    retrieved: str = ""
+    dataset_version: str = DEFAULT_VERSION
 
 
 # ---------------------------------------------------------------------------
@@ -229,6 +284,20 @@ def _resolve_refs(refs, hop: Hop, names: dict[str, str]) -> list[str]:
     return resolved
 
 
+def _apply_provenance(record: dict, target) -> None:
+    """Copy ``provenance.primary`` fields onto a hop or malt record."""
+    provenance = record.get("provenance")
+    if not isinstance(provenance, dict):
+        return
+    primary = provenance.get("primary")
+    if not isinstance(primary, dict):
+        return
+    target.publisher = _squash(str(primary.get("publisher") or ""))
+    target.document = _squash(str(primary.get("document") or ""))
+    target.document_url = _squash(str(primary.get("url") or ""))
+    target.retrieved = _squash(str(primary.get("retrieved") or ""))
+
+
 def _parse_hop(item: dict, hop_id: str, names: dict[str, str], version: str) -> Hop:
     """Map one dataset record to a :class:`Hop` (missing fields stay empty)."""
     name = _squash(str(item.get("name") or "")) or names.get(hop_id) or _id_to_name(hop_id)
@@ -258,14 +327,7 @@ def _parse_hop(item: dict, hop_id: str, names: dict[str, str], version: str) -> 
             if copied:
                 hop.oils.append((label, copied))
 
-    provenance = item.get("provenance")
-    if isinstance(provenance, dict):
-        primary = provenance.get("primary")
-        if isinstance(primary, dict):
-            hop.publisher = _squash(str(primary.get("publisher") or ""))
-            hop.document = _squash(str(primary.get("document") or ""))
-            hop.document_url = _squash(str(primary.get("url") or ""))
-            hop.retrieved = _squash(str(primary.get("retrieved") or ""))
+    _apply_provenance(item, hop)
     return hop
 
 
@@ -322,6 +384,84 @@ def parse_dataset(payload: bytes) -> list[Hop]:
     return _load_dataset(payload)[0]
 
 
+def _parse_malt(item: dict, malt_id: str, version: str) -> Malt:
+    """Map one fermentables record to a :class:`Malt` (missing fields stay empty)."""
+    malt_type = _squash(str(item.get("type") or ""))
+    group = _squash(str(item.get("grainGroup") or ""))
+    if not group and malt_type.casefold() in ("grain", "adjunct"):
+        group = malt_type
+
+    malt = Malt(
+        id=malt_id,
+        name=_squash(str(item.get("name") or "")) or _id_to_name(malt_id),
+        maltster=_squash(str(item.get("maltster") or "")),
+        origin=_squash(str(item.get("origin") or "")),
+        group=group,
+        aliases=_dedupe(_text_list(item.get("aliases"))),
+        description=_squash(str(item.get("description") or "")),
+        notes=_squash(str(item.get("notes") or "")),
+        dataset_version=version,
+    )
+
+    for key, source_key in MALT_RANGE_KEYS:
+        copied = _copy_range(item.get(source_key))
+        if copied:
+            malt.ranges[key] = copied
+    for label, source_key in MALT_DIASTATIC_KEYS:
+        copied = _copy_range(item.get(source_key))
+        if copied:
+            malt.diastatic.append((label, copied))
+
+    _apply_provenance(item, malt)
+    return malt
+
+
+def _load_malts(payload: bytes) -> tuple[list[Malt], int, int]:
+    """Parse a fermentables.json payload -> ``(malts, skipped, filtered_extracts)``."""
+    try:
+        data = json.loads(payload.decode("utf-8"))
+    except (UnicodeDecodeError, json.JSONDecodeError):
+        raise SourceUnavailableError(
+            f"brewing.tools: payload is not JSON ({FERMENTABLES_URL}) - "
+            "source moved or blocking automated access?"
+        )
+    if not isinstance(data, dict):
+        raise SourceUnavailableError(
+            f"brewing.tools: payload is not a JSON object ({FERMENTABLES_URL})"
+        )
+
+    items = data.get("fermentables")
+    if not isinstance(items, list) or not items:
+        raise SourceUnavailableError(
+            f"brewing.tools: payload has no 'fermentables' list ({FERMENTABLES_URL}) - "
+            "dataset restructured?"
+        )
+
+    version = _squash(str(data.get("version") or "")) or DEFAULT_VERSION
+
+    malts: list[Malt] = []
+    skipped = 0
+    filtered_extracts = 0
+    for item in items:
+        if not isinstance(item, dict):
+            skipped += 1
+            continue
+        malt_id = _squash(str(item.get("id") or ""))
+        if not malt_id:
+            skipped += 1
+            continue
+        if _squash(str(item.get("type") or "")).casefold() == "extract":
+            filtered_extracts += 1  # extracts are out of scope by decision
+            continue
+        malts.append(_parse_malt(item, malt_id, version))
+    return malts, skipped, filtered_extracts
+
+
+def parse_malts(payload: bytes) -> list[Malt]:
+    """Pure parser for one brewing.tools fermentables.json payload (fully offline)."""
+    return _load_malts(payload)[0]
+
+
 # ---------------------------------------------------------------------------
 # Rendering
 # ---------------------------------------------------------------------------
@@ -337,20 +477,20 @@ def _profile_text(hop: Hop) -> str:
     return _squash(" ".join(part for part in (hop.pedigree, hop.notes) if part))
 
 
-def _provenance_lines(hop: Hop) -> list[str]:
+def _provenance_lines(record: Hop | Malt) -> list[str]:
     """``"{publisher} — {document} (retrieved {date})"`` + URL (whatever exists)."""
     attribution = " — ".join(
-        part for part in (hop.publisher, hop.document) if part
+        part for part in (record.publisher, record.document) if part
     )
-    if hop.retrieved:
+    if record.retrieved:
         attribution = (
-            f"{attribution} (retrieved {hop.retrieved})"
+            f"{attribution} (retrieved {record.retrieved})"
             if attribution
-            else f"Retrieved {hop.retrieved}"
+            else f"Retrieved {record.retrieved}"
         )
     lines = [attribution] if attribution else []
-    if hop.document_url:
-        lines.append(hop.document_url)
+    if record.document_url:
+        lines.append(record.document_url)
     return lines
 
 
@@ -450,6 +590,140 @@ def render_hop(hop: Hop) -> str:
     return text
 
 
+def _malt_range(ranges: dict[str, dict], key: str, unit: str) -> str | None:
+    """``_range`` for one malt band, skipping the dataset's 0..0 marker."""
+    obj = ranges.get(key)
+    if _is_zero_pair(obj):
+        return None
+    return _range(obj, unit)
+
+
+def _malt_spec_lines(malt: Malt) -> list[str]:
+    """Key-spec bullets, published bands only, in retrieval order."""
+    spec_lines: list[str] = []
+
+    colour_l = _malt_range(malt.ranges, "colour_l", " °L")
+    colour_ebc = _malt_range(malt.ranges, "colour_ebc", " EBC")
+    if colour_l and colour_ebc:
+        spec_lines.append(f"- Colour: {colour_l} ({colour_ebc})")
+    elif colour_l or colour_ebc:
+        spec_lines.append(f"- Colour: {colour_l or colour_ebc}")
+
+    extract = _malt_range(malt.ranges, "extract", "%")
+    if extract:
+        spec_lines.append(f"- Extract (fine grind, dry basis): {extract}")
+
+    moisture = _malt_range(malt.ranges, "moisture", "%")
+    if moisture:
+        spec_lines.append(f"- Moisture: {moisture}")
+
+    max_batch = _malt_range(malt.ranges, "max_batch", "%")
+    if max_batch:
+        spec_lines.append(f"- Max in batch: {max_batch}")
+
+    diastatic: list[str] = []
+    for label, obj in malt.diastatic:
+        if _is_zero_pair(obj):
+            continue
+        value = _range(obj, f" {label}")
+        if value:
+            diastatic.append(value)
+    if diastatic:
+        combined = " (".join(diastatic) + (")" if len(diastatic) > 1 else "")
+        spec_lines.append(f"- Diastatic power: {combined}")
+
+    protein = _malt_range(malt.ranges, "protein", "%")
+    if protein:
+        spec_lines.append(f"- Protein: {protein}")
+
+    total_nitrogen = _malt_range(malt.ranges, "total_nitrogen", "%")
+    if total_nitrogen:
+        spec_lines.append(f"- Total nitrogen: {total_nitrogen}")
+
+    soluble_n_ratio = _malt_range(malt.ranges, "soluble_n_ratio", "%")
+    if soluble_n_ratio:
+        spec_lines.append(f"- Soluble nitrogen ratio: {soluble_n_ratio}")
+
+    coarse_extract = _malt_range(malt.ranges, "coarse_extract", "%")
+    if coarse_extract:
+        spec_lines.append(f"- Extract (coarse grind, dry basis): {coarse_extract}")
+
+    coarse_fine_diff = _malt_range(malt.ranges, "coarse_fine_diff", "%")
+    if coarse_fine_diff:
+        spec_lines.append(f"- Coarse/fine extract difference: {coarse_fine_diff}")
+
+    return spec_lines
+
+
+def _malt_profile_text(malt: Malt) -> str:
+    """``description`` then ``notes``, joined into one narrative."""
+    return _squash(" ".join(part for part in (malt.description, malt.notes) if part))
+
+
+def render_malt(malt: Malt) -> str:
+    """Render one malt/adjunct as a compact, one-chunk markdown document.
+
+    Order is retrieval-driven: title, type/maltster/origin/group/aliases and
+    the key specs land inside the embedding window; the narrative profile and
+    provenance follow. The title stays the bare name -- the ``malt-`` filename
+    prefix and the Type line carry the entity type.
+    """
+    lines = [f"# {malt.name}", ""]
+
+    meta = ["**Type:** Ingredient (Malt)"]
+    if malt.maltster:
+        meta.append(f"**Maltster:** {malt.maltster}")
+    if malt.origin:
+        meta.append(f"**Origin:** {malt.origin}")
+    if malt.group:
+        meta.append(f"**Group:** {malt.group}")
+    if malt.aliases:
+        meta.append(f"**Also known as:** {_capped(malt.aliases, MAX_ALIASES)}")
+    meta.append(
+        f"**Source:** {DATASET_LABEL} v{malt.dataset_version} (ODbL 1.0)"
+        f" — {DATASET_PAGE}"
+    )
+    lines += meta + [""]
+
+    spec_lines = _malt_spec_lines(malt)
+    if spec_lines:
+        lines += ["## Key Specs", *spec_lines, ""]
+
+    header = "\n".join(lines)  # ends with "\n" (the trailing blank element)
+    provenance_lines = _provenance_lines(malt)
+    reserve = 0
+    if provenance_lines:
+        # "\n## Provenance\n" + body + "\n"
+        reserve = len("\n## Provenance\n") + len("\n".join(provenance_lines)) + 1
+
+    profile_source = _malt_profile_text(malt)
+    budget = MAX_DOC_CHARS - len(header) - len("\n## Profile\n") - 1 - reserve
+    budget = max(300, min(PROFILE_MAX_CHARS, budget))
+    profile = _truncate(profile_source, budget) if profile_source else ""
+
+    body = list(lines)
+    if profile:
+        body += ["## Profile", profile, ""]
+    if provenance_lines:
+        body += ["## Provenance", *provenance_lines, ""]
+    text = _finish(body)
+
+    if len(text) > MAX_DOC_CHARS and profile:
+        # Unreachable for real data (header is bounded); safety net for
+        # pathological payloads: shrink the narrative by the overflow.
+        overflow = len(text) - MAX_DOC_CHARS
+        profile = _truncate(profile, max(0, len(profile) - overflow - 1))
+        body = list(lines)
+        if profile:
+            body += ["## Profile", profile, ""]
+        if provenance_lines:
+            body += ["## Provenance", *provenance_lines, ""]
+        text = _finish(body)
+    if len(text) > MAX_DOC_CHARS:  # absolute cap, never exceed one chunk
+        text = text[:MAX_DOC_CHARS].rstrip() + "\n"
+    return text
+
+
 def hop_filename(hop: Hop) -> str:
     """``hop-<dataset-id>.md`` -- the ``hop-`` prefix is the ingest contract.
 
@@ -458,6 +732,23 @@ def hop_filename(hop: Hop) -> str:
     """
     slug = _slug(hop.id) if hop.id else ""
     return f"hop-{slug}.md" if slug else "hop-variety.md"
+
+
+def malt_filename(malt: Malt) -> str:
+    """``malt-<dataset-id>.md`` -- the ``malt-`` prefix is the ingest contract."""
+    slug = _slug(malt.id) if malt.id else ""
+    return f"malt-{slug}.md" if slug else "malt-grain.md"
+
+
+def _unique_filename(filename: str, used: dict[str, str]) -> str:
+    """Append ``-2``, ``-3``, ... to a filename already taken in ``used``."""
+    if filename not in used:
+        return filename
+    stem = filename[:-3]
+    suffix = 2
+    while f"{stem}-{suffix}.md" in used:
+        suffix += 1
+    return f"{stem}-{suffix}.md"
 
 
 def write_documents(docs: dict[str, str], dest: Path) -> list[Path]:
@@ -487,33 +778,44 @@ def write_documents(docs: dict[str, str], dest: Path) -> list[Path]:
 class BrewingToolsCollector(DataCollector):
     id = "brewingtools"
     description = (
-        "brewing.tools open hop database "
-        "(alpha/beta acids, oils, aroma, substitutes)"
+        "brewing.tools open ingredient database "
+        "(hops: alpha/beta acids, oils, aroma, substitutes; "
+        "malts: colour, extract, diastatic power)"
     )
 
     def collect(self, dest: Path) -> list[Path]:
         # Fetch + parse + render everything BEFORE clearing dest: a failed run
-        # must never wipe previously collected hop files.
-        payload = fetch(SOURCE_URL)          # SourceUnavailableError propagates
-        hops, skipped = _load_dataset(payload)
-        if skipped:
-            print(f"brewingtools: {skipped} records skipped (malformed)")
+        # must never wipe previously collected files.
+        hops_payload = fetch(SOURCE_URL)          # SourceUnavailableError propagates
+        malts_payload = fetch(FERMENTABLES_URL)   # same source -> all-or-nothing
+        hops, skipped_hops = _load_dataset(hops_payload)
+        malts, skipped_malts, filtered_extracts = _load_malts(malts_payload)
+
+        if skipped_hops:
+            print(f"brewingtools: {skipped_hops} hop records skipped (malformed)")
+        if skipped_malts:
+            print(f"brewingtools: {skipped_malts} malt records skipped (malformed)")
+        if filtered_extracts:
+            print(f"brewingtools: {filtered_extracts} extract records excluded (no extracts)")
+
         if len(hops) < MIN_RECORDS:
             raise SourceUnavailableError(
                 f"brewingtools: only {len(hops)} hop records in {SOURCE_URL} "
                 f"(expected >= {MIN_RECORDS}) - dataset restructured?"
             )
+        if len(malts) < MIN_MALT_RECORDS:
+            raise SourceUnavailableError(
+                f"brewingtools: only {len(malts)} malt records in {FERMENTABLES_URL} "
+                f"(expected >= {MIN_MALT_RECORDS}) - dataset restructured?"
+            )
 
         rendered: dict[str, str] = {}
         for hop in hops:
-            filename = hop_filename(hop)
-            if filename in rendered:  # deterministic collision suffix
-                stem = filename[:-3]
-                suffix = 2
-                while f"{stem}-{suffix}.md" in rendered:
-                    suffix += 1
-                filename = f"{stem}-{suffix}.md"
+            filename = _unique_filename(hop_filename(hop), rendered)
             rendered[filename] = render_hop(hop)
+        for malt in malts:
+            filename = _unique_filename(malt_filename(malt), rendered)
+            rendered[filename] = render_malt(malt)
 
-        print(f"brewingtools: {len(rendered)} hop varieties")
+        print(f"brewingtools: {len(hops)} hop varieties, {len(malts)} malts")
         return write_documents(rendered, dest)

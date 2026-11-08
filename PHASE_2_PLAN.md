@@ -27,7 +27,7 @@
 ## 2. Scope
 
 1. **Collector application** (new): framework + runner + **five MVP collectors**:
-   `diydog`, `bjcp`, `whitelabs`, `wyeast`, `brewingtools (hops)`
+   `diydog`, `bjcp`, `whitelabs`, `wyeast`, `brewingtools (hops + malts)`
 2. **Ingestion reads configurable `data_dirs`** (default `[data, collected_data]`) instead of hardcoded `data/`
 3. **New formats via canonical output:** BeerXML recipes, BJCP styles, lab/hop reference docs — collectors normalize to formats ingest understands (`.md` / `.txt` / `.xml` / `.csv`)
 4. **Chunking by entity type** (one recipe/style/hop per chunk — AGENTS.md §6.6)
@@ -55,7 +55,7 @@ collectors/
 ├── bjcp_collector.py    # BJCP 2021 export → bjcp/*.md (one style per file)
 ├── whitelabs_collector.py  # White Labs strain pages → ingredients/yeast-*.md
 ├── wyeast_collector.py     # Wyeast strain pages → ingredients/yeast-*.md
-└── brewingtools_collector.py   # brewing.tools hop dataset → ingredients/hop-*.md
+└── brewingtools_collector.py   # brewing.tools hops + fermentables → hop-*/malt-*.md
 ```
 
 ```python
@@ -121,7 +121,7 @@ embedding_model: all-MiniLM-L6-v2
 | `bjcp_collector` | [bjcp.org downloads](https://www.bjcp.org/beer-styles/downloads-and-resources) — 2021 community JSON/XML exports | `bjcp/*.md` (one style per file) | download + convert |
 | `whitelabs_collector` | whitelabs.com public strain pages | `ingredients/yeast-*.md` | web (polite) |
 | `wyeast_collector` | wyeast.com public strain pages | `ingredients/yeast-*.md` | web (polite) |
-| `brewingtools_collector` | [brewing.tools open ingredient database](https://brewing.tools/charts) `/data/hops.json` (123 hop varieties, ODbL 1.0) | `ingredients/hop-*.md` | JSON download |
+| `brewingtools_collector` | [brewing.tools open ingredient database](https://brewing.tools/charts) — `/data/hops.json` (123) + `/data/fermentables.json` (383; 2 extracts excluded → 381 malts/adjuncts), ODbL 1.0 | `ingredients/hop-*.md`, `ingredients/malt-*.md` | JSON download |
 
 **Repo fixtures (committed, in `data/`):** the 20 Phase 1 docs (they double as eval grounding), 1–2 hand-written sample `.xml` recipes, and the self-authored CSV reference tables (substitutions, alpha acids, yeast/malt comparisons — decision §9.3).
 
@@ -176,9 +176,13 @@ brew-assistant/
 - Download the 2021 community JSON/XML export → render one `.md` per style (code, name, vital-stat ranges, short impression excerpt) → `bjcp/`.
 - Raw downloads stay in the collector's dest area — never committed.
 
-### Step 5 — Lab & hop collectors (~1.5 days)
+### Step 5 — Lab, hop & malt collectors (~1.5 days)
 - `whitelabs_collector`, `wyeast_collector`: iterate public strain pages → normalize (name, attenuation, flocculation, flavor profile, temperature) → `ingredients/yeast-<slug>.md`.
-- `brewingtools_collector`: single JSON download of the brewing.tools open ingredient database (`/data/hops.json`, 123 varieties, ODbL 1.0) → normalize (alpha/beta acids, cohumulone, oils, aroma, substitutes/pairings, provenance) → `ingredients/hop-<id>.md`. No scraping and no PDF extraction.
+- `brewingtools_collector`: one run downloads both JSONs of the brewing.tools open ingredient database (same dataset version 0.7.0, ODbL 1.0): `/data/hops.json` (123 varieties) and `/data/fermentables.json` (383 records; 2 liquid extracts excluded by decision → 381 malts/adjuncts).
+  - Hops normalized as before (alpha/beta acids, cohumulone, oils, aroma, substitutes/pairings, provenance) → `ingredients/hop-<id>.md`.
+  - Malts normalized → `ingredients/malt-<id>.md`: colour °L and EBC both exactly as published (never converted), extract fine grind, moisture, max in batch, protein/total-nitrogen/soluble-nitrogen figures, diastatic power (Lintner and/or Windisch-Kolbach, either or both), aliases, grain group, description/notes profile, provenance.
+  - Known gaps, accepted: 252/381 rendered malts have no description/notes (specs still render); the dataset has no substitutes, no pairings and no PPG field, so none are invented; extracts are excluded.
+  - No scraping and no PDF extraction. All-or-nothing: if either endpoint fails or is restructured, the collector SKIPs and leaves previous files untouched.
   - HopUnion is gone as a public reference and beerMaverick is behind a Cloudflare managed challenge (HTTP 403 `Cf-Mitigated: challenge` for every path), so neither is used.
 - Shared `web.py` keeps the web collectors thin; all fail-soft when sources are unreachable or restructured (see §8).
 

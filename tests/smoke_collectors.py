@@ -48,10 +48,17 @@ from collectors.wyeast_collector import (  # noqa: E402
 import collectors.brewingtools_collector as brewingtools_collector  # noqa: E402
 from collectors.brewingtools_collector import (  # noqa: E402
     BrewingToolsCollector,
+    FERMENTABLES_URL,
+    MIN_MALT_RECORDS,
+    SOURCE_URL,
     Hop,
+    Malt,
     hop_filename,
+    malt_filename,
     parse_dataset,
+    parse_malts,
     render_hop,
+    render_malt,
     write_documents as write_brewingtools_documents,
 )
 
@@ -863,6 +870,129 @@ def main() -> None:
             }
         ).encode("utf-8")
 
+        # enough hop records to clear MIN_RECORDS for the success path
+        bulk_hops = [full_record, typical_record, minimal_record] + [
+            {
+                "id": f"variety-{i}",
+                "name": f"Variety {i}",
+                "alphaAcidPercent": {"min": 5, "max": 6},
+            }
+            for i in range(50)
+        ]
+        bulk_hops_payload = _json.dumps(
+            {"version": "0.7.0", "hops": bulk_hops}
+        ).encode("utf-8")
+
+        # --- brewingtools malts: synthetic fermentables.json payload ---
+        malt_full_record = {
+            "id": "weyermann-abbey-malt",
+            "name": "Abbey Malt®",
+            "type": "grain",
+            "grainGroup": "specialty",
+            "maltster": "Weyermann Specialty Malts",
+            "origin": "Germany, EU",
+            "aliases": ["Abbey Malt", "Weyermann Abbey Malt"],
+            "colourLovibond": {"min": 15.5, "max": 19.3},
+            "colourEbc": {"min": 40, "max": 50},
+            "extractFineGrindDryPercent": {"min": 75},
+            "moisturePercent": {"max": 4.5},
+            "maxInBatchPercent": {"max": 50},
+            "proteinPercent": {"min": 8.1, "max": 9.7},
+            "description": (
+                "Made from the finest malting quality barley. The special "
+                "manufacturing process creates an extra crunchy malt with a "
+                "complex aroma profile."
+            ),
+            "notes": (
+                "Weyermann sensory description: complex malt aroma with intense "
+                "notes of biscuit and honey, nuts and chocolate."
+            ),
+            "provenance": {
+                "primary": {
+                    "publisher": "Weyermann Specialty Malts",
+                    "document": "Product Specification — Weyermann® Abbey Malt®",
+                    "url": "https://www.weyermann.de/abbey-malt-specification.pdf",
+                    "retrieved": "2026-08-10",
+                }
+            },
+        }
+        malt_typical_record = {
+            "id": "dingemans-amber-aromatic-md",
+            "name": "Dingemans Amber Aromatic MD",
+            "type": "grain",
+            "grainGroup": "specialty",
+            "maltster": "Dingemans",
+            "colourLovibond": {"typical": 20},
+            "extractFineGrindDryPercent": {"typical": 79},
+            "moisturePercent": {"typical": 4.5},
+            "diastaticPowerLintner": {"typical": 43},
+        }
+        malt_minimal_record = {
+            "id": "mystery-malt",
+            "name": "",
+            "colourLovibond": {"typical": 2},
+            "provenance": {
+                "primary": {
+                    "publisher": "Some Maltster",
+                    "document": "Spec Sheet",
+                    "url": "https://example.com/spec.pdf",
+                    "retrieved": "2026-08-10",
+                }
+            },
+        }
+        malt_adjunct_record = {
+            "id": "simpsons-flaked-oats",
+            "name": "Simpsons Flaked Oats",
+            "type": "adjunct",
+            "grainGroup": "flaked",
+            "colourLovibond": {"typical": 1.8},
+            "moisturePercent": {"typical": 8},
+        }
+        malt_extract_record = {
+            "id": "briess-lme-pilsen",
+            "name": "Briess Pilsen Light LME",
+            "type": "extract",
+            "colourLovibond": {"typical": 1.9},
+        }
+        malt_broken_record = {"name": "No id"}
+
+        malts_payload = _json.dumps(
+            {
+                "name": "brewing.tools open ingredient database - fermentables",
+                "version": "0.7.0",
+                "recordCount": 6,
+                "fermentables": [
+                    malt_full_record,
+                    malt_typical_record,
+                    malt_minimal_record,
+                    malt_adjunct_record,
+                    malt_extract_record,
+                    malt_broken_record,
+                ],
+            }
+        ).encode("utf-8")
+
+        # enough malt records to clear MIN_MALT_RECORDS for the success path
+        bulk_malts = [
+            malt_full_record,
+            malt_typical_record,
+            malt_minimal_record,
+            malt_adjunct_record,
+            malt_extract_record,
+            malt_broken_record,
+        ] + [
+            {
+                "id": f"bulk-malt-{i}",
+                "name": f"Bulk Malt {i}",
+                "type": "grain",
+                "colourLovibond": {"typical": 2},
+            }
+            for i in range(MIN_MALT_RECORDS)
+        ]
+        bulk_malts_payload = _json.dumps(
+            {"version": "0.7.0", "fermentables": bulk_malts}
+        ).encode("utf-8")
+
         hops = parse_dataset(hops_payload)
         assert len(hops) == 3, hops
         hops_by_id = {hop.id: hop for hop in hops}
@@ -924,6 +1054,106 @@ def main() -> None:
         assert hop_filename(citra_hop) == "hop-citra-hbc-394.md", hop_filename(citra_hop)
         assert hop_filename(Hop()) == "hop-variety.md", hop_filename(Hop())
 
+        # --- brewingtools malts ---
+        malts = parse_malts(malts_payload)
+        assert len(malts) == 4, [m.id for m in malts]
+        malts_by_id = {malt.id: malt for malt in malts}
+        assert "briess-lme-pilsen" not in malts_by_id, "extract record must be filtered"
+        assert set(malts_by_id) == {
+            "weyermann-abbey-malt",
+            "dingemans-amber-aromatic-md",
+            "mystery-malt",
+            "simpsons-flaked-oats",
+        }, set(malts_by_id)
+        abbey_malt = malts_by_id["weyermann-abbey-malt"]
+        assert abbey_malt.dataset_version == "0.7.0", abbey_malt.dataset_version
+        assert abbey_malt.maltster == "Weyermann Specialty Malts", abbey_malt.maltster
+        assert abbey_malt.group == "specialty", abbey_malt.group
+        assert abbey_malt.aliases == ["Abbey Malt", "Weyermann Abbey Malt"], abbey_malt.aliases
+        assert malts_by_id["simpsons-flaked-oats"].group == "flaked", (
+            malts_by_id["simpsons-flaked-oats"].group
+        )
+        assert malts_by_id["mystery-malt"].group == "", malts_by_id["mystery-malt"].group
+        assert malts_by_id["mystery-malt"].name == "Mystery Malt", (
+            malts_by_id["mystery-malt"].name
+        )
+
+        abbey_doc = render_malt(abbey_malt)
+        assert abbey_doc.startswith("# Abbey Malt®"), abbey_doc[:60]
+        for meta_line in (
+            "**Type:** Ingredient (Malt)",
+            "**Maltster:** Weyermann Specialty Malts",
+            "**Origin:** Germany, EU",
+            "**Group:** specialty",
+            "**Also known as:** Abbey Malt, Weyermann Abbey Malt",
+            "**Source:** brewing.tools open ingredient database v0.7.0 (ODbL 1.0)",
+        ):
+            assert meta_line in abbey_doc, f"missing meta {meta_line!r}"
+        for bullet in (
+            "- Colour: 15.5–19.3 °L (40–50 EBC)",
+            "- Extract (fine grind, dry basis): from 75%",
+            "- Moisture: up to 4.5%",
+            "- Max in batch: up to 50%",
+            "- Protein: 8.1–9.7%",
+        ):
+            assert bullet in abbey_doc, f"missing bullet {bullet!r}"
+        assert "## Profile\nMade from the finest malting quality barley" in abbey_doc, abbey_doc
+        assert "Weyermann sensory description" in abbey_doc, abbey_doc
+        assert "## Provenance\nWeyermann Specialty Malts" in abbey_doc, abbey_doc
+        assert "https://www.weyermann.de/abbey-malt-specification.pdf" in abbey_doc
+        for absent in ("## Substitutions", "## Pairs well with", "## Aroma"):
+            assert absent not in abbey_doc, f"{absent!r} must not be rendered for malts"
+        assert len(abbey_doc) <= 1900, len(abbey_doc)
+        assert abbey_doc.endswith("\n") and not abbey_doc.endswith("\n\n"), abbey_doc[-40:]
+        assert all(
+            line == line.rstrip() for line in abbey_doc.splitlines()
+        ), "trailing whitespace in malt doc"
+
+        typical_malt_doc = render_malt(malts_by_id["dingemans-amber-aromatic-md"])
+        assert typical_malt_doc.startswith("# Dingemans Amber Aromatic MD"), (
+            typical_malt_doc[:60]
+        )
+        assert "- Colour: 20 °L" in typical_malt_doc, typical_malt_doc
+        assert "EBC" not in typical_malt_doc, typical_malt_doc
+        assert "- Extract (fine grind, dry basis): 79%" in typical_malt_doc, typical_malt_doc
+        assert "- Diastatic power: 43 °Lintner" in typical_malt_doc, typical_malt_doc
+        assert "°WK" not in typical_malt_doc, typical_malt_doc
+        assert "## Profile" not in typical_malt_doc, typical_malt_doc
+        assert len(typical_malt_doc) <= 1900, len(typical_malt_doc)
+
+        minimal_malt_doc = render_malt(malts_by_id["mystery-malt"])
+        for absent in ("**Maltster:**", "**Origin:**", "**Group:**"):
+            assert absent not in minimal_malt_doc, minimal_malt_doc
+        assert "- Colour: 2 °L" in minimal_malt_doc, minimal_malt_doc
+        for absent_bullet in (
+            "- Extract (fine grind, dry basis):",
+            "- Moisture:",
+            "- Diastatic power:",
+        ):
+            assert absent_bullet not in minimal_malt_doc, minimal_malt_doc
+        assert "## Provenance" in minimal_malt_doc, minimal_malt_doc
+
+        adjunct_malt_doc = render_malt(malts_by_id["simpsons-flaked-oats"])
+        assert "**Group:** flaked" in adjunct_malt_doc, adjunct_malt_doc
+        assert "**Type:** Ingredient (Malt)" in adjunct_malt_doc, adjunct_malt_doc
+
+        # filenames: malt- prefix is the ingest contract
+        assert malt_filename(abbey_malt) == "malt-weyermann-abbey-malt.md", malt_filename(
+            abbey_malt
+        )
+        assert malt_filename(Malt()) == "malt-grain.md", malt_filename(Malt())
+
+        # a 6000-char profile is truncated inside the one-chunk budget
+        long_malt = Malt(
+            id="long-malt",
+            name="Long Malt",
+            description="A long malt description. " * 200,
+            notes="More long malt notes. " * 100,
+        )
+        long_malt_doc = render_malt(long_malt)
+        assert len(long_malt_doc) <= 1900, len(long_malt_doc)
+        assert long_malt_doc.endswith(" …\n"), long_malt_doc[-40:]
+
         # write_documents: clears its own subtree, writes only ingredients/
         bt_dest = tmp / "brewingtools_write"
         (bt_dest / "ingredients").mkdir(parents=True, exist_ok=True)
@@ -935,11 +1165,14 @@ def main() -> None:
         assert bt_written[0].parent == bt_dest / "ingredients", bt_written[0]
         assert [p.name for p in bt_dest.iterdir()] == ["ingredients"]
 
-        # fail soft matrix: network error, non-JSON, empty/too-small dataset
+        # fail soft matrix: network error, non-JSON, empty/too-small dataset,
+        # and the malt endpoint failing while the hop endpoint is healthy
         bt_soft_dest = tmp / "brewingtools_soft"
         bt_kept = bt_soft_dest / "ingredients" / "hop-keep.md"
+        bt_malt_kept = bt_soft_dest / "ingredients" / "malt-keep.md"
         bt_kept.parent.mkdir(parents=True, exist_ok=True)
         bt_kept.write_text("# keep\n", encoding="utf-8")
+        bt_malt_kept.write_text("# keep\n", encoding="utf-8")
 
         def _bt_offline(url, **kwargs):
             raise SourceUnavailableError(f"offline: {url}")
@@ -947,19 +1180,46 @@ def main() -> None:
         def _bt_garbage(url, **kwargs):
             return b"<html>not json</html>"
 
-        def _bt_empty(url, **kwargs):
-            return _json.dumps({"version": "0.7.0", "hops": []}).encode("utf-8")
+        def _bt_empty_hops(url, **kwargs):
+            if url == SOURCE_URL:
+                return _json.dumps({"version": "0.7.0", "hops": []}).encode("utf-8")
+            return malts_payload
 
-        def _bt_too_small(url, **kwargs):
-            small = [dict(typical_record, id=f"variety-{i}") for i in range(10)]
-            return _json.dumps({"version": "0.7.0", "hops": small}).encode("utf-8")
+        def _bt_too_few_hops(url, **kwargs):
+            if url == SOURCE_URL:
+                small = [dict(typical_record, id=f"variety-{i}") for i in range(10)]
+                return _json.dumps({"version": "0.7.0", "hops": small}).encode("utf-8")
+            return malts_payload
+
+        def _bt_malts_garbage(url, **kwargs):
+            if url == FERMENTABLES_URL:
+                return b"<html>not json</html>"
+            return bulk_hops_payload
+
+        def _bt_malts_empty(url, **kwargs):
+            if url == FERMENTABLES_URL:
+                return _json.dumps(
+                    {"version": "0.7.0", "fermentables": []}
+                ).encode("utf-8")
+            return bulk_hops_payload
+
+        def _bt_malts_too_few(url, **kwargs):
+            if url == FERMENTABLES_URL:
+                small = [dict(malt_minimal_record, id=f"malt-{i}") for i in range(10)]
+                return _json.dumps(
+                    {"version": "0.7.0", "fermentables": small}
+                ).encode("utf-8")
+            return bulk_hops_payload
 
         original_bt_fetch = brewingtools_collector.fetch
         for label, fake_fetch in (
             ("network error", _bt_offline),
             ("non-JSON payload", _bt_garbage),
-            ("empty hops list", _bt_empty),
-            ("too few records", _bt_too_small),
+            ("empty hops list", _bt_empty_hops),
+            ("too few hop records", _bt_too_few_hops),
+            ("non-JSON malt payload", _bt_malts_garbage),
+            ("empty fermentables list", _bt_malts_empty),
+            ("too few malt records", _bt_malts_too_few),
         ):
             brewingtools_collector.fetch = fake_fetch
             try:
@@ -973,32 +1233,42 @@ def main() -> None:
                     )
             finally:
                 brewingtools_collector.fetch = original_bt_fetch
-            assert bt_kept.is_file(), f"{label}: fail-soft run wiped prior output"
+            assert bt_kept.is_file(), f"{label}: fail-soft run wiped prior hop output"
+            assert bt_malt_kept.is_file(), f"{label}: fail-soft run wiped prior malt output"
 
-        # success path: enough records -> rendered files written
-        bulk = [full_record, typical_record, minimal_record] + [
-            {
-                "id": f"variety-{i}",
-                "name": f"Variety {i}",
-                "alphaAcidPercent": {"min": 5, "max": 6},
-            }
-            for i in range(50)
-        ]
+        # success path: enough records -> hops and malts written in one run
         bt_live_dest = tmp / "brewingtools_live"
-        brewingtools_collector.fetch = lambda url, **kwargs: _json.dumps(
-            {"version": "0.7.0", "hops": bulk}
-        ).encode("utf-8")
+        brewingtools_collector.fetch = lambda url, **kwargs: (
+            bulk_hops_payload if url == SOURCE_URL else bulk_malts_payload
+        )
         try:
             bt_live_written = BrewingToolsCollector().collect(bt_live_dest)
         finally:
             brewingtools_collector.fetch = original_bt_fetch
-        assert len(bt_live_written) == len(bulk), len(bt_live_written)
+        expected_malts = MIN_MALT_RECORDS + 4  # 4 fixture malts; extract dropped
+        assert len(bt_live_written) == len(bulk_hops) + expected_malts, (
+            len(bt_live_written),
+            len(bulk_hops),
+            expected_malts,
+        )
         assert (
             bt_live_dest / "ingredients" / "hop-citra-hbc-394.md"
         ).is_file()
         assert (
             bt_live_dest / "ingredients" / "hop-triskel.md"
         ).is_file()
+        assert (
+            bt_live_dest / "ingredients" / "malt-weyermann-abbey-malt.md"
+        ).is_file()
+        assert (
+            bt_live_dest / "ingredients" / "malt-simpsons-flaked-oats.md"
+        ).is_file()
+        assert not (
+            bt_live_dest / "ingredients" / "malt-briess-lme-pilsen.md"
+        ).exists(), "extract must not be written"
+        assert len(
+            list((bt_live_dest / "ingredients").glob("malt-*.md"))
+        ) == expected_malts
 
         # registry
         assert "wyeast" in all_registered(), all_registered().keys()
@@ -1023,7 +1293,11 @@ def main() -> None:
         print("      wyeast sitemap/culture parsing (multi-tab dedupe, bacteria,")
         print("      -PC availability, filename/one-chunk contract, fail-soft),")
         print("      brewingtools hop dataset (range quirks, id->name resolution,")
-        print("      one-chunk rendering, hop- filenames, fail-soft, naming rule)")
+        print("      one-chunk rendering, hop- filenames, fail-soft),")
+        print("      brewingtools malt dataset (colour L/EBC as published, extract/")
+        print("      moisture/protein/DP bands, extracts excluded, group fallback,")
+        print("      malt- filenames, one-chunk rendering, both-or-nothing fail-soft,")
+        print("      naming rule)")
     finally:
         shutil.rmtree(tmp, ignore_errors=True)
 
