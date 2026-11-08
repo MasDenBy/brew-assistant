@@ -13,6 +13,6 @@ collectors:                           # enabled data collectors (python -m colle
   - bjcp
   - whitelabs
   - wyeast
-  - hopunion
+  - brewingtools
 chroma_dir: chroma_db
 embedding_model: all-MiniLM-L6-v2

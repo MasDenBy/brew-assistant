@@ -45,6 +45,15 @@ from collectors.wyeast_collector import (  # noqa: E402
     strain_filename as wyeast_filename,
     write_documents as write_wyeast_documents,
 )
+import collectors.brewingtools_collector as brewingtools_collector  # noqa: E402
+from collectors.brewingtools_collector import (  # noqa: E402
+    BrewingToolsCollector,
+    Hop,
+    hop_filename,
+    parse_dataset,
+    render_hop,
+    write_documents as write_brewingtools_documents,
+)
 
 
 @register
@@ -101,7 +110,7 @@ def main() -> None:
         assert not (tmp / "styles").exists(), "collector wrote outside its namespace"
         assert not (tmp / "smoke_unavailable").exists(), "SKIP should not create dirs"
 
-        # HTML → markdown helper (used by whitelabs/wyeast/hopunion collectors)
+        # HTML → markdown helper (used by whitelabs/wyeast collectors)
         html = (
             "<html><head><script>var x=1;</script></head><body>"
             "<h2>Strauss</h2><p>Attenuation <b>74</b>-76%.</p>"
@@ -784,8 +793,227 @@ def main() -> None:
                 wyeast_collector.fetch_text = original_wy_fetch_text
             assert wy_kept.is_file(), f"{label}: fail-soft run wiped prior output"
 
+        # --- brewingtools: synthetic hops.json payload, no network ---
+        full_record = {
+            "id": "citra-hbc-394",
+            "name": "Citra HBC 394",
+            "category": "hop",
+            "origin": "USA",
+            "pedigree": "Bred by the Hop Breeding Company and released in 2007.",
+            "aromaDescriptors": ["citrus", "tropical"],
+            # dataset ids: resolve to names; the self-reference is dropped
+            "substitutes": ["mckenzie-c-148", "triskel", "citra-hbc-394"],
+            "pairings": ["triskel"],
+            "alphaAcidPercent": {"min": 11, "max": 14.3},
+            "betaAcidPercent": {"min": 2.7, "max": 4.5},
+            "cohumulonePercentOfAlpha": {"min": 20, "max": 35},
+            "totalOilMlPer100g": {"max": 2.8},
+            "oilComposition": {
+                "myrcenePercent": {"min": 29, "max": 66},
+                "humulenePercent": {"min": 7.9, "max": 13.2},
+                "geraniolPercent": {"min": 0, "max": 0},   # "not published"
+            },
+            "provenance": {
+                "primary": {
+                    "publisher": "Crosby Hops",
+                    "document": "Hop Catalog - Citra HBC 394",
+                    "url": "https://www.crosbyhops.com/shop-hops/hop-catalog/citra",
+                    "retrieved": "2026-08-10",
+                }
+            },
+        }
+        typical_record = {
+            "id": "mckenzie-c-148",
+            "name": "McKenzie C-148",
+            "origin": "USA",
+            "alphaAcidPercent": {"typical": 10.3},
+            "betaAcidPercent": {"typical": 8.7},
+            "totalOilMlPer100g": {"typical": 2.3},
+            "provenance": {
+                "primary": {
+                    "publisher": "John I. Haas",
+                    "document": "Hop Spec Sheet",
+                    "url": "https://hops.com.au/downloads/data-sheet/america/McKenzie-Data-Sheet.pdf",
+                    "retrieved": "2026-08-10",
+                }
+            },
+        }
+        minimal_record = {
+            "id": "triskel",
+            "name": "Triskel",
+            "origin": "",
+            "alphaAcidPercent": {"min": 1.5, "max": 5},
+            "totalOilMlPer100g": {"min": 1.5},
+            "provenance": {
+                "primary": {
+                    "publisher": "Hopsteiner",
+                    "document": "Hop Variety Data Sheet - Triskel",
+                    "url": "https://hopsteiner.us/variety-data-sheets/triskel/",
+                    "retrieved": "2026-08-10",
+                }
+            },
+        }
+        hops_payload = _json.dumps(
+            {
+                "name": "brewing.tools open ingredient database - hop varieties",
+                "version": "0.7.0",
+                "generated": "2026-09-28",
+                "recordCount": 3,
+                "hops": [full_record, typical_record, minimal_record],
+            }
+        ).encode("utf-8")
+
+        hops = parse_dataset(hops_payload)
+        assert len(hops) == 3, hops
+        hops_by_id = {hop.id: hop for hop in hops}
+        citra_hop = hops_by_id["citra-hbc-394"]
+        # substitutes/pairings are dataset IDs -> display names; self-ref dropped
+        assert citra_hop.substitutes == ["McKenzie C-148", "Triskel"], citra_hop.substitutes
+        assert citra_hop.pairings == ["Triskel"], citra_hop.pairings
+        assert citra_hop.dataset_version == "0.7.0", citra_hop.dataset_version
+        assert hops_by_id["triskel"].origin == "", hops_by_id["triskel"].origin
+
+        citra_doc = render_hop(citra_hop)
+        assert citra_doc.startswith("# Citra HBC 394 Hops"), citra_doc[:60]
+        assert "**Type:** Ingredient (Hop)" in citra_doc
+        assert "**Origin:** USA" in citra_doc
+        for bullet in (
+            "- Alpha acid: 11–14.3%",
+            "- Beta acid: 2.7–4.5%",
+            "- Cohumulone: 20–35% of alpha",
+            "- Total oils: up to 2.8 mL/100g",
+        ):
+            assert bullet in citra_doc, f"missing bullet {bullet!r}"
+        assert (
+            "- Oil composition: myrcene 29–66%, humulene 7.9–13.2%" in citra_doc
+        ), citra_doc
+        assert "geraniol" not in citra_doc, "{min:0,max:0} must be omitted"
+        assert "## Substitutions\nMcKenzie C-148, Triskel" in citra_doc, citra_doc
+        assert "## Aroma\ncitrus, tropical" in citra_doc, citra_doc
+        assert "## Pairs well with\nTriskel" in citra_doc, citra_doc
+        assert "## Profile\nBred by the Hop Breeding Company" in citra_doc, citra_doc
+        assert "## Provenance\nCrosby Hops" in citra_doc, citra_doc
+        assert "https://www.crosbyhops.com/shop-hops/hop-catalog/citra" in citra_doc
+        assert len(citra_doc) <= 1900, len(citra_doc)
+
+        typical_doc = render_hop(hops_by_id["mckenzie-c-148"])
+        assert typical_doc.startswith("# McKenzie C-148 Hops"), typical_doc[:60]
+        assert "- Alpha acid: 10.3%" in typical_doc, typical_doc
+        assert "- Total oils: 2.3 mL/100g" in typical_doc, typical_doc
+        assert "## Substitutions" not in typical_doc, typical_doc
+        assert "## Aroma" not in typical_doc, typical_doc
+        assert len(typical_doc) <= 1900, len(typical_doc)
+
+        minimal_doc = render_hop(hops_by_id["triskel"])
+        assert "**Origin:**" not in minimal_doc, minimal_doc
+        assert "- Beta acid:" not in minimal_doc, minimal_doc
+        assert "- Total oils: from 1.5 mL/100g" in minimal_doc, minimal_doc
+        assert len(minimal_doc) <= 1900, len(minimal_doc)
+
+        # a 5000-char pedigree is truncated inside the one-chunk budget
+        long_hop = Hop(
+            id="long-profile",
+            name="Long Profile",
+            pedigree="A long pedigree sentence. " * 200,
+        )
+        long_doc = render_hop(long_hop)
+        assert len(long_doc) <= 1900, len(long_doc)
+        assert long_doc.endswith(" …\n"), long_doc[-40:]
+
+        # filenames: hop- prefix is the ingest contract; dataset id verbatim
+        assert hop_filename(citra_hop) == "hop-citra-hbc-394.md", hop_filename(citra_hop)
+        assert hop_filename(Hop()) == "hop-variety.md", hop_filename(Hop())
+
+        # write_documents: clears its own subtree, writes only ingredients/
+        bt_dest = tmp / "brewingtools_write"
+        (bt_dest / "ingredients").mkdir(parents=True, exist_ok=True)
+        bt_stale = bt_dest / "ingredients" / "hop-stale.md"
+        bt_stale.write_text("old", encoding="utf-8")
+        bt_written = write_brewingtools_documents({"hop-x.md": "# X\n"}, bt_dest)
+        assert len(bt_written) == 1 and bt_written[0].is_file()
+        assert not bt_stale.exists(), "stale file survived re-run"
+        assert bt_written[0].parent == bt_dest / "ingredients", bt_written[0]
+        assert [p.name for p in bt_dest.iterdir()] == ["ingredients"]
+
+        # fail soft matrix: network error, non-JSON, empty/too-small dataset
+        bt_soft_dest = tmp / "brewingtools_soft"
+        bt_kept = bt_soft_dest / "ingredients" / "hop-keep.md"
+        bt_kept.parent.mkdir(parents=True, exist_ok=True)
+        bt_kept.write_text("# keep\n", encoding="utf-8")
+
+        def _bt_offline(url, **kwargs):
+            raise SourceUnavailableError(f"offline: {url}")
+
+        def _bt_garbage(url, **kwargs):
+            return b"<html>not json</html>"
+
+        def _bt_empty(url, **kwargs):
+            return _json.dumps({"version": "0.7.0", "hops": []}).encode("utf-8")
+
+        def _bt_too_small(url, **kwargs):
+            small = [dict(typical_record, id=f"variety-{i}") for i in range(10)]
+            return _json.dumps({"version": "0.7.0", "hops": small}).encode("utf-8")
+
+        original_bt_fetch = brewingtools_collector.fetch
+        for label, fake_fetch in (
+            ("network error", _bt_offline),
+            ("non-JSON payload", _bt_garbage),
+            ("empty hops list", _bt_empty),
+            ("too few records", _bt_too_small),
+        ):
+            brewingtools_collector.fetch = fake_fetch
+            try:
+                try:
+                    BrewingToolsCollector().collect(bt_soft_dest)
+                except SourceUnavailableError:
+                    pass
+                else:
+                    raise AssertionError(
+                        f"{label}: source problem must raise SourceUnavailableError"
+                    )
+            finally:
+                brewingtools_collector.fetch = original_bt_fetch
+            assert bt_kept.is_file(), f"{label}: fail-soft run wiped prior output"
+
+        # success path: enough records -> rendered files written
+        bulk = [full_record, typical_record, minimal_record] + [
+            {
+                "id": f"variety-{i}",
+                "name": f"Variety {i}",
+                "alphaAcidPercent": {"min": 5, "max": 6},
+            }
+            for i in range(50)
+        ]
+        bt_live_dest = tmp / "brewingtools_live"
+        brewingtools_collector.fetch = lambda url, **kwargs: _json.dumps(
+            {"version": "0.7.0", "hops": bulk}
+        ).encode("utf-8")
+        try:
+            bt_live_written = BrewingToolsCollector().collect(bt_live_dest)
+        finally:
+            brewingtools_collector.fetch = original_bt_fetch
+        assert len(bt_live_written) == len(bulk), len(bt_live_written)
+        assert (
+            bt_live_dest / "ingredients" / "hop-citra-hbc-394.md"
+        ).is_file()
+        assert (
+            bt_live_dest / "ingredients" / "hop-triskel.md"
+        ).is_file()
+
         # registry
         assert "wyeast" in all_registered(), all_registered().keys()
+        assert "brewingtools" in all_registered(), all_registered().keys()
+        assert "hopunion" not in all_registered(), all_registered().keys()
+
+        # naming rule: <resource>_collector.py with id = "<resource>"
+        for collector_id, collector_cls in all_registered().items():
+            if collector_id.startswith("smoke_"):
+                continue  # synthetic collectors defined in this test module
+            module_name = collector_cls.__module__.rsplit(".", 1)[-1]
+            assert module_name == f"{collector_id}_collector", (
+                f"{collector_id} must live in {collector_id}_collector.py, "
+                f"found {module_name}.py"
+            )
 
         print("PASS: registry, runner statuses (OK/SKIP/FAIL/MISSING),")
         print("      namespace rule, HTML -> markdown conversion,")
@@ -793,7 +1021,9 @@ def main() -> None:
         print("      bjcp style rendering (sections, type/tags, aliases, payload),")
         print("      whitelabs strain parsing/rendering (specs, styles, fail-soft),")
         print("      wyeast sitemap/culture parsing (multi-tab dedupe, bacteria,")
-        print("      -PC availability, filename/one-chunk contract, fail-soft)")
+        print("      -PC availability, filename/one-chunk contract, fail-soft),")
+        print("      brewingtools hop dataset (range quirks, id->name resolution,")
+        print("      one-chunk rendering, hop- filenames, fail-soft, naming rule)")
     finally:
         shutil.rmtree(tmp, ignore_errors=True)
 

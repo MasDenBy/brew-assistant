@@ -16,13 +16,18 @@ files in these formats and knows nothing about collectors.
 
 How to add a new data source
 ----------------------------
-1. Create ``collectors/<name>_collector.py``.
-2. Subclass :class:`DataCollector`; set class attributes ``id`` and
-   ``description``.
+1. Create ``collectors/<resource>_collector.py``.
+2. Subclass :class:`DataCollector`; set the class attributes
+   ``id = "<resource>"`` and ``description``.
 3. Implement ``collect(self, dest) -> list[Path]`` — ``dest`` is already the
    namespaced directory you own (``collect_dest/<id>/``).
 4. Decorate the class with :func:`@register`.
 5. Add ``id`` to the ``collectors:`` list in ``config.yaml``.
+
+Naming convention (pinned by ``tests/smoke_collectors.py``): the module is
+``<resource>_collector.py``, the registry ``id`` is ``<resource>``, and the
+collector's namespace is ``collect_dest/<resource>/``. Examples: ``bjcp``,
+``diydog``, ``whitelabs``, ``wyeast``, ``brewingtools``.
 
 Nothing in ``ingest.py`` / ``rag.py`` / ``app.py`` changes for a new source.
 

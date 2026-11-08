@@ -27,7 +27,7 @@
 ## 2. Scope
 
 1. **Collector application** (new): framework + runner + **five MVP collectors**:
-   `diydog`, `bjcp`, `whitelabs`, `wyeast`, `hopunion`
+   `diydog`, `bjcp`, `whitelabs`, `wyeast`, `brewingtools (hops)`
 2. **Ingestion reads configurable `data_dirs`** (default `[data, collected_data]`) instead of hardcoded `data/`
 3. **New formats via canonical output:** BeerXML recipes, BJCP styles, lab/hop reference docs — collectors normalize to formats ingest understands (`.md` / `.txt` / `.xml` / `.csv`)
 4. **Chunking by entity type** (one recipe/style/hop per chunk — AGENTS.md §6.6)
@@ -55,7 +55,7 @@ collectors/
 ├── bjcp_collector.py    # BJCP 2021 export → bjcp/*.md (one style per file)
 ├── whitelabs_collector.py  # White Labs strain pages → ingredients/yeast-*.md
 ├── wyeast_collector.py     # Wyeast strain pages → ingredients/yeast-*.md
-└── hopunion_collector.py   # Hop Union variety info → ingredients/hop-*.md
+└── brewingtools_collector.py   # brewing.tools hop dataset → ingredients/hop-*.md
 ```
 
 ```python
@@ -87,7 +87,7 @@ data_dirs:                              # where ingest reads from
   - collected_data                      # gitignored collector output; chat works without it
 collect_dest: collected_data            # where collectors write (default for dev;
                                         # user may point elsewhere, e.g. \\myshare\brew)
-collectors: [diydog, bjcp, whitelabs, wyeast, hopunion]
+collectors: [diydog, bjcp, whitelabs, wyeast, brewingtools]
 chroma_dir: chroma_db
 embedding_model: all-MiniLM-L6-v2
 ```
@@ -121,7 +121,7 @@ embedding_model: all-MiniLM-L6-v2
 | `bjcp_collector` | [bjcp.org downloads](https://www.bjcp.org/beer-styles/downloads-and-resources) — 2021 community JSON/XML exports | `bjcp/*.md` (one style per file) | download + convert |
 | `whitelabs_collector` | whitelabs.com public strain pages | `ingredients/yeast-*.md` | web (polite) |
 | `wyeast_collector` | wyeast.com public strain pages | `ingredients/yeast-*.md` | web (polite) |
-| `hopunion_collector` | hopunion.com hop variety info/PDFs | `ingredients/hop-*.md` | web (polite) |
+| `brewingtools_collector` | [brewing.tools open ingredient database](https://brewing.tools/charts) `/data/hops.json` (123 hop varieties, ODbL 1.0) | `ingredients/hop-*.md` | JSON download |
 
 **Repo fixtures (committed, in `data/`):** the 20 Phase 1 docs (they double as eval grounding), 1–2 hand-written sample `.xml` recipes, and the self-authored CSV reference tables (substitutions, alpha acids, yeast/malt comparisons — decision §9.3).
 
@@ -136,7 +136,7 @@ brew-assistant/
 ├── collectors/                # NEW — collector application (see §3.1)
 │   ├── base.py  __main__.py  web.py
 │   ├── diydog_collector.py  bjcp_collector.py
-│   ├── whitelabs_collector.py  wyeast_collector.py  hopunion_collector.py
+│   ├── whitelabs_collector.py  wyeast_collector.py  brewingtools_collector.py
 ├── collected_data/            # gitignored — collector output (default collect_dest)
 ├── data/                      # FIXTURES ONLY (+ self-authored CSV tables)
 │   ├── styles/  ingredients/  # Phase 1 docs (kept)
@@ -176,10 +176,11 @@ brew-assistant/
 - Download the 2021 community JSON/XML export → render one `.md` per style (code, name, vital-stat ranges, short impression excerpt) → `bjcp/`.
 - Raw downloads stay in the collector's dest area — never committed.
 
-### Step 5 — Lab & hop web collectors (~1.5 days)
+### Step 5 — Lab & hop collectors (~1.5 days)
 - `whitelabs_collector`, `wyeast_collector`: iterate public strain pages → normalize (name, attenuation, flocculation, flavor profile, temperature) → `ingredients/yeast-<slug>.md`.
-- `hopunion_collector`: hop variety pages/PDFs (alpha acid %, flavor/aroma, typical uses) → `ingredients/hop-<slug>.md`; if PDF-only, use a pinned light PDF text extractor.
-- Shared `web.py` keeps the three collectors thin; all fail-soft when sites are unreachable or restructured (see §8).
+- `brewingtools_collector`: single JSON download of the brewing.tools open ingredient database (`/data/hops.json`, 123 varieties, ODbL 1.0) → normalize (alpha/beta acids, cohumulone, oils, aroma, substitutes/pairings, provenance) → `ingredients/hop-<id>.md`. No scraping and no PDF extraction.
+  - HopUnion is gone as a public reference and beerMaverick is behind a Cloudflare managed challenge (HTTP 403 `Cf-Mitigated: challenge` for every path), so neither is used.
+- Shared `web.py` keeps the web collectors thin; all fail-soft when sources are unreachable or restructured (see §8).
 
 ### Step 6 — Chunking by entity type (~0.5 day)
 - Per-type strategy: `recipe`, `bjcp_style`, table rows → no split (entity = chunk, length guard); `.md` → existing splitter only when oversized.
@@ -205,7 +206,7 @@ brew-assistant/
 | Risk | Mitigation |
 |------|------------|
 | **Source unreachable** (network down, repo removed, share offline) | Collectors fail soft with a warning; ingest skips missing `data_dirs`; fixtures keep chat + tests usable offline |
-| **Web collector fragility** (whitelabs/wyeast/hopunion restructure pages, block scrapers, or restrict ToS) | Isolate each in its own collector with a shared `web.py`; strict one-time polite fetching (tiny request count); if a site blocks automated access, fall back to manual seeding of strain/variety `.md` files into the collector's dest namespace; verify ToS compliance when implementing Step 5 |
+| **Web collector fragility** (whitelabs/wyeast restructure pages, block scrapers, or restrict ToS) | Isolate each in its own collector with a shared `web.py`; strict one-time polite fetching (tiny request count); if a site blocks automated access, fall back to manual seeding of strain `.md` files into the collector's dest namespace; verify ToS compliance when implementing Step 5. Hops are no longer scraped: `brewingtools_collector` is a single plain JSON download. beerMaverick is Cloudflare-blocked and is not used. |
 | **Contract drift** between collector output and ingest expectations | Canonical-format contract (§3.1) + `tests/smoke_ingest.py` pins it; ingest only ever sees files |
 | **Re-collect clobbering manual files** | Each collector owns only `collect_dest/<id>/` |
 | **Licensing / personal data in git** | Nothing third-party or personal is committed; `collected_data/` gitignored; fixtures self-authored/minimal |
@@ -218,7 +219,7 @@ brew-assistant/
 ## 9. Resolved Decisions (with user)
 
 1. **`collect_dest`:** default `collected_data/` (gitignored) for easy development; users point it wherever they like. **`data_dirs`:** default `[data, collected_data]` — chat usable without running collectors.
-2. **MVP collectors:** `diydog`, `bjcp`, `whitelabs`, `wyeast`, `hopunion`.
+2. **MVP collectors:** `diydog`, `bjcp`, `whitelabs`, `wyeast`, `brewingtools`.
 3. **Self-authored CSV reference tables:** stay in repo `data/` (needed for testing, license-clean).
 4. **Default `top_k`:** raised from 4 to **6**.
 5. **`local_folder_collector`:** out of scope for Phase 2 — recorded in `BREW_BOT_PLAN.md` §11 for later consideration. (Basic own-file support exists via `data_dirs`, which accepts any folder of `.md`/`.xml`/`.csv`.)
