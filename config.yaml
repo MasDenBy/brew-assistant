@@ -12,6 +12,7 @@ collect_dest: collected_data          # collectors write here (default for dev; 
 collectors:                           # enabled data collectors (python -m collectors)
   - diydog
   - bjcp
+  - ba
   - whitelabs
   - wyeast
   - brewingtools

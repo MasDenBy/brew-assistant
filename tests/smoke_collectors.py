@@ -61,6 +61,15 @@ from collectors.brewingtools_collector import (  # noqa: E402
     render_malt,
     write_documents as write_brewingtools_documents,
 )
+import collectors.ba_collector as ba_collector  # noqa: E402
+from collectors.ba_collector import (  # noqa: E402
+    BrewersAssociationCollector,
+    MIN_STYLES,
+    parse_guidelines as parse_ba_guidelines,
+    render_style as render_ba_style,
+    style_filename as ba_style_filename,
+    write_documents as write_ba_documents,
+)
 
 
 @register
@@ -1270,9 +1279,213 @@ def main() -> None:
             list((bt_live_dest / "ingredients").glob("malt-*.md"))
         ) == expected_malts
 
+        # --- brewers association (ba): synthetic guidelines page, no network ---
+        ba_html = """
+        <html><head><title>2026 Brewers Association Beer Style Guidelines</title></head>
+        <body>
+        <section id="beer-styles-toc">
+          <h1 id='Ale Styles'>Ale Styles</h1>
+          <ul class="beer-style-origin-toc"><li class='style'>
+            <a class='scrollto-anchor' href='#941'>Ordinary Bitter</a></li></ul>
+        </section>
+        <section id="other"><section><p>nested noise</p></section></section>
+        <section id="beer-styles">
+          <p>amp &#38; noise &#8212; outside blocks</p>
+          <h1 class='center-content'>Ale Styles</h1>
+          <h2 class='origin block-heading'>
+            <img alt='' class='circle-image' src='British.jpg'>
+            British Origin Ale Styles
+          </h2>
+          <div class="beer-style">
+          <ul class="list-with-heading" id="941">
+            <li>Ordinary Bitter</li>
+            <li><strong>Color:</strong> Gold to copper-colored</li>
+            <li><strong>Perceived Malt Aroma &#038; Flavor:</strong>
+                Low to medium\t\t\tresidual malt sweetness</li>
+            <li><strong>Additional notes:</strong> Plain note text
+              <em>Italic competition note.</em></li>
+          </ul>
+          <ul class="horizontal wider">
+            <li><strong>Original Gravity (°Plato)</strong> 1.033-1.038 (8.3-9.5 °Plato)</li>
+            <li><strong>Apparent Extract/Final Gravity (°Plato)</strong>
+                1.006-1.012 (1.5-3.1 °Plato)</li>
+            <li><strong>Alcohol by Weight (Volume)</strong> 2.40%-3.30% (3.00%-4.20%)</li>
+            <li><strong>Bitterness (IBU)</strong> 20-35</li>
+            <li><strong>Color SRM (EBC)</strong> 5-12(10-24 EBC)</li>
+          </ul></div>
+          <p><!--End Style--></p>
+          <div class="beer-style">
+          <ul class="list-with-heading" id="963">
+            <li>Session Beer</li>
+            <li><strong>Color:</strong> Varies by base style</li>
+          </ul>
+          <!-- no vital-statistics ul here -->
+          <h1 class='mb-5' id='Lager Styles'>Lager Styles</h1>
+          <h2 class='origin block-heading'>North American Origin Lager Styles</h2>
+          <div class="beer-style">
+          <ul class="list-with-heading" id="1002">
+            <li>Mexican-Style Light Lager</li>
+            <li><strong>Color:</strong> Very pale</li>
+          </ul>
+          <ul class="horizontal wider">
+            <li><strong>Bitterness (IBU)</strong> 15-25</li>
+          </ul></div>
+          <!-- family nav ul variant that must NOT become stats -->
+          <ul class="wp-block-list horizontal simple border-0">
+            <li><strong>Nav:</strong> decoy</li>
+          </ul>
+        </section>
+        </body></html>
+        """
+        ba_styles = parse_ba_guidelines(ba_html)
+        assert len(ba_styles) == 3, [s.name for s in ba_styles]
+        bitter, session, mexican = ba_styles
+
+        assert bitter.name == "Ordinary Bitter", bitter.name
+        assert bitter.style_id == "941", bitter.style_id
+        # family/origin come from the detail section, never from the TOC copy
+        assert bitter.family == "Ale Styles", bitter.family
+        assert bitter.origin == "British Origin Ale Styles", bitter.origin
+        assert bitter.attributes[0] == ("Color", "Gold to copper-colored")
+        assert bitter.attributes[1] == (
+            "Perceived Malt Aroma & Flavor",
+            "Low to medium residual malt sweetness",
+        ), bitter.attributes[1]
+        assert (
+            "Plain note text Italic competition note."
+            in dict(bitter.attributes)["Additional notes"]
+        ), bitter.attributes
+        assert len(bitter.stats) == 5, bitter.stats
+        assert bitter.stats[0] == (
+            "Original Gravity (°Plato)",
+            "1.033-1.038 (8.3-9.5 °Plato)",
+        ), bitter.stats[0]
+        assert len(session.stats) == 0, session.stats
+        assert session.origin == "British Origin Ale Styles", session.origin
+        assert mexican.family == "Lager Styles", mexican.family
+        assert mexican.origin == "North American Origin Lager Styles", mexican.origin
+
+        bitter_doc = render_ba_style(bitter)
+        assert bitter_doc.startswith("# Ordinary Bitter (BA style)"), bitter_doc[:60]
+        assert (
+            "Family: Ale Styles | Origin: British Origin Ale Styles | "
+            "BA style id: 941 | Source: Brewers Association Beer Style "
+            "Guidelines (2026)" in bitter_doc
+        ), bitter_doc
+        # all vital statistics on ONE dense line inside the embedding window
+        stats_line = next(
+            line for line in bitter_doc.splitlines() if line.startswith("OG:")
+        )
+        for frag in (
+            "FG: 1.006-1.012 (1.5-3.1 °Plato)",
+            "Alcohol: 2.40%-3.30% (3.00%-4.20%)",
+            "IBU: 20-35",
+            "Color: 5-12(10-24 EBC)",
+        ):
+            assert frag in stats_line, f"{frag!r} missing from {stats_line!r}"
+        assert "## Color\nGold to copper-colored" in bitter_doc, bitter_doc
+        assert "## Additional notes\nPlain note text Italic" in bitter_doc
+        assert "## Nav" not in bitter_doc, "decoy nav ul leaked into style"
+        assert "<" not in bitter_doc, f"raw HTML leaked: {bitter_doc!r}"
+        assert all(
+            line == line.rstrip() for line in bitter_doc.splitlines()
+        ), "trailing whitespace"
+        assert bitter_doc.endswith("\n") and not bitter_doc.endswith("\n\n")
+
+        assert ba_style_filename(bitter) == "941-ordinary-bitter.md", ba_style_filename(bitter)
+
+        # style without vital statistics renders fine, without the section
+        session_doc = render_ba_style(session)
+        assert session_doc.startswith("# Session Beer (BA style)"), session_doc[:60]
+        assert "## Vital statistics" not in session_doc, session_doc
+        assert "## Color\nVaries by base style" in session_doc, session_doc
+
+        # idempotent write: stale files in the namespace are cleared
+        ba_write_dest = tmp / "ba_write"
+        (ba_write_dest / "styles").mkdir(parents=True, exist_ok=True)
+        ba_stale = ba_write_dest / "styles" / "stale.md"
+        ba_stale.write_text("old", encoding="utf-8")
+        ba_written = write_ba_documents({"941-ordinary-bitter.md": "# X\n"}, ba_write_dest)
+        assert len(ba_written) == 1 and ba_written[0].is_file()
+        assert not ba_stale.exists(), "stale file survived re-run"
+        assert ba_written[0].parent == ba_write_dest / "styles", ba_written[0]
+        assert [p.name for p in ba_write_dest.iterdir()] == ["styles"]
+
+        # payload sanity: garbage page -> SKIP, not a corrupt knowledge base
+        try:
+            parse_ba_guidelines(
+                "<html><body><p>not the guidelines</p></body></html>"
+            )
+        except SourceUnavailableError:
+            pass
+        else:
+            raise AssertionError("layout change must raise SourceUnavailableError")
+
+        # enough bulk styles (one per block) to clear MIN_STYLES for the live path
+        def _ba_bulk_page(count: int) -> str:
+            blocks = []
+            for i in range(count):
+                blocks.append(
+                    f'<div class="beer-style">'
+                    f'<ul class="list-with-heading" id="{9000 + i}">'
+                    f"<li>Bulk Style {i}</li>"
+                    f"<li><strong>Color:</strong> Straw gold</li>"
+                    f"</ul>"
+                    f'<ul class="horizontal wider">'
+                    f"<li><strong>Bitterness (IBU)</strong> {i}-{i + 1}</li>"
+                    f"</ul></div>"
+                )
+            return (
+                "<html><body><section id='beer-styles'>"
+                "<h1>Ale Styles</h1>" + "".join(blocks) + "</section></body></html>"
+            )
+
+        bulk_ba_page = _ba_bulk_page(MIN_STYLES + 5)
+
+        # success path: page fetched -> one markdown file per style
+        ba_live_dest = tmp / "ba_live"
+        original_ba_fetch = ba_collector.fetch_text
+        ba_collector.fetch_text = lambda url, **kwargs: bulk_ba_page
+        try:
+            ba_live_written = BrewersAssociationCollector().collect(ba_live_dest)
+        finally:
+            ba_collector.fetch_text = original_ba_fetch
+        assert len(ba_live_written) == MIN_STYLES + 5, len(ba_live_written)
+        first_bulk = ba_live_dest / "styles" / f"9000-bulk-style-0.md"
+        assert first_bulk.is_file(), first_bulk
+        assert "# Bulk Style 0 (BA style)" in first_bulk.read_text(encoding="utf-8")
+
+        # fail-soft: unreachable page or garbage page keep prior output intact
+        ba_soft_dest = tmp / "ba_soft"
+        ba_kept = ba_soft_dest / "styles" / "keep.md"
+        ba_kept.parent.mkdir(parents=True, exist_ok=True)
+        ba_kept.write_text("# keep\n", encoding="utf-8")
+
+        def _ba_offline(url, **kwargs):
+            raise SourceUnavailableError(f"offline: {url}")
+
+        for label, fake_fetch in (
+            ("network error", _ba_offline),
+            ("layout-changed page", lambda url, **kwargs: "<html>no styles</html>"),
+        ):
+            ba_collector.fetch_text = fake_fetch
+            try:
+                try:
+                    BrewersAssociationCollector().collect(ba_soft_dest)
+                except SourceUnavailableError:
+                    pass
+                else:
+                    raise AssertionError(
+                        f"{label}: source problem must raise SourceUnavailableError"
+                    )
+            finally:
+                ba_collector.fetch_text = original_ba_fetch
+            assert ba_kept.is_file(), f"{label}: fail-soft run wiped prior output"
+
         # registry
         assert "wyeast" in all_registered(), all_registered().keys()
         assert "brewingtools" in all_registered(), all_registered().keys()
+        assert "ba" in all_registered(), all_registered().keys()
         assert "hopunion" not in all_registered(), all_registered().keys()
 
         # naming rule: <resource>_collector.py with id = "<resource>"
@@ -1297,7 +1510,11 @@ def main() -> None:
         print("      brewingtools malt dataset (colour L/EBC as published, extract/")
         print("      moisture/protein/DP bands, extracts excluded, group fallback,")
         print("      malt- filenames, one-chunk rendering, both-or-nothing fail-soft,")
-        print("      naming rule)")
+        print("      naming rule),")
+        print("      brewers association guidelines parsing (families/origins from")
+        print("      the detail section, TOC ignored, whitespace collapse, dense")
+        print("      statistics line, stats-less styles, styles/ files, idempotent,")
+        print("      MIN_STYLES sanity guard, fail-soft, naming rule)")
     finally:
         shutil.rmtree(tmp, ignore_errors=True)
 
