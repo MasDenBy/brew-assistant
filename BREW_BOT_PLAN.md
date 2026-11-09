@@ -133,7 +133,8 @@ ollama run llama3.1:8b
 
 - **BJCP Style Guidelines** — beer style definitions (PDF/text, publicly available)
 - **BeerXML recipe repositories** — public collections on GitHub
-- **Hop varieties** — Hopswiki, HopUnion, Yakima Chief (alpha acid, flavor profiles)
+- **Hop varieties** — brewing.tools open ingredient database (ODbL), Hopswiki, Yakima Chief (alpha acid, flavor profiles)
+- **Malt specs** — brewing.tools open ingredient database (`/data/fermentables.json`, ODbL): colour, extract, moisture, protein and diastatic power
 - **Yeast labs** — White Labs, Wyeast (attenuation, flocculation, flavor)
 - **Malt data** — Briess, Weyermann, etc. (public spec sheets)
 - **Hugging Face / Kaggle** — search "beer recipe" datasets
@@ -164,10 +165,12 @@ RAG tuning (not model fine-tuning in MVP):
 - Build Streamlit chat (retrieve + generate)
 - Verify: "Can I substitute Cascade hops?" returns a sourced answer
 
-### Phase 2 — Data Expansion (1 week)
-- Add BeerXML recipe collection
+### Phase 2 — Data Expansion (1 week, replanned: see `PHASE_2_PLAN.md`)
+- **Data collector application**: one collector class per source (e.g. `bjcp_collector.py`, `whitelabs_collector.py`); collectors download/normalize into a user-configured directory (e.g. `\\myshare\brew`) outside git. Repo `data/` holds fixtures only (no bulk, third-party, or personal files in git). Adding a source = adding a collector class
+- Add BeerXML recipe collection (via collector)
 - Add hop/malt/yeast reference tables (CSV → text chunks)
-- Add BJCP style guidelines
+- Add BJCP style guidelines (via collector)
+- Ingestion reads configurable `data_dirs` (fixtures + collected/personal library)
 - Improve chunking by entity type
 
 ### Phase 3 — Polish (1 week)
@@ -199,4 +202,5 @@ RAG tuning (not model fine-tuning in MVP):
 - [x] Frontend: Streamlit vs. Gradio? → **Streamlit** (decided Sun Nov 01 2026)
 - [x] RAG framework: LangChain vs. LlamaIndex? → **LangChain** (decided Sun Nov 01 2026)
 - [x] Which 7B model to start with: Llama-3.1-8B vs. Qwen2.5-7B vs. Mistral-7B? → **Qwen2.5-7B** via Ollama (decided Sun Nov 01 2026)
-- [ ] Exact public data sources for BeerXML recipes and hop/malt references? → deferred to Phase 2; Phase 1 uses generated docs (see `PHASE_1_PLAN.md`)
+- [x] Exact public data sources for BeerXML recipes and hop/malt references? → **decided:** MVP collectors = DIY Dog (BeerXML), BJCP exports, White Labs, Wyeast, brewing.tools (`/data/hops.json`, `/data/fermentables.json`, ODbL 1.0) (see `PHASE_2_PLAN.md` §5/§9)
+- [ ] How should users index their *own* personal files (own recipes, personal ingredient notes)? A dedicated `local_folder_collector` was deferred from Phase 2 — basic support already exists via `data_dirs` (point it at any folder of `.md`/`.xml`/`.csv`); revisit whether a dedicated collector (copy vs. read-in-place, normalization) is worth building

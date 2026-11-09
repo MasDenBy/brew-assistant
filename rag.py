@@ -2,6 +2,7 @@
 
 Model name/temperature/top_k come from config.yaml only — never hardcode them.
 """
+from collections import Counter
 from functools import lru_cache
 
 from langchain_chroma import Chroma
@@ -14,6 +15,22 @@ from config import load_config
 
 COLLECTION_NAME = "brew_docs"
 
+# Entity types produced by ingest (see ingest.py infer_type). Order is the
+# sidebar display order; unknown future types are appended alphabetically.
+TYPE_ORDER = (
+    "style", "bjcp_style", "hop", "malt", "yeast", "recipe", "table", "ingredient",
+)
+TYPE_LABELS = {
+    "style": "Style docs (repo)",
+    "bjcp_style": "BJCP guidelines",
+    "hop": "Hops",
+    "malt": "Malts",
+    "yeast": "Yeasts",
+    "recipe": "Recipes",
+    "table": "Reference tables",
+    "ingredient": "Other ingredients",
+}
+
 SYSTEM_PROMPT = """\
 You are Brew Assistant, a knowledgeable home brewing expert helping home \
 brewers with beer styles, ingredients (hops, malts, yeasts), and substitutions.
@@ -24,16 +41,31 @@ labeled with its source filename and type.
 - Check the context carefully before answering: the answer is often there, \
 including exact numbers (IBU, ABV, SRM, gravity) and strain or ingredient \
 names. When it is, quote those values exactly as written in the context.
+- Never sum, average, scale, or extrapolate quantities across entries. A \
+number that is not stated verbatim in the context is not in the context; say \
+so instead of computing one.
 - Only say "I don't have that information" if the context genuinely lacks \
 the answer — first make sure you have read the whole context.
 - Never invent numbers, yeast strain names, or filenames. If it is not in \
 the context, do not state it.
-- When you use information from a document, cite it inline using the source \
-filename, e.g. [source: ingredients/hop-cascade.md]. Copy the filename \
-EXACTLY as it appears in the context blocks — never invent a filename. If \
-you did not use any document, do not add a citation.
+- When you use information from a document, cite it inline as \
+[source: <full source path from that document's context block>]. Copy the \
+whole path EXACTLY as shown, including every directory segment — if the \
+context shows `a/b/c.md`, then `c.md` or `b/c.md` is wrong. A context path \
+that starts with a collector folder (bjcp/, diydog/, whitelabs/, wyeast/, \
+brewingtools/) keeps that folder; do not drop it. Never invent a path and \
+never reuse a path from these instructions. Only cite files that are shown in \
+the context above; a file you believe exists but that is not in the context is \
+not a valid citation. If you did not use any document, do not add a citation. Cite the \
+document you actually read (for example the substitution table or a hop doc) \
+— never a hypothetical file for an ingredient that merely appears in your \
+answer.
 - For ingredient substitution questions, prefer substitutes explicitly \
-mentioned in the context.
+mentioned in the context. If a substitute is only named inside another \
+document (a table row or a hop description), cite that document — never a \
+separate file for the substitute that is not shown in the context. Put the \
+citation on the sentence that introduces the list; do not add one \
+[source: ...] per list item.
 - Be concise and practical: your reader is a home brewer at their bench.
 """
 
@@ -41,7 +73,10 @@ PROMPT = ChatPromptTemplate.from_messages(
     [
         ("system", SYSTEM_PROMPT),
         ("placeholder", "{history}"),
-        ("human", "{question}"),
+        # The retrieved context MUST be referenced here — a template variable
+        # that is passed but never rendered is silently dropped (bug present
+        # since Step 5: answers were model priors, not grounded content).
+        ("human", "Context documents:\n{context}\n\nQuestion: {question}"),
     ]
 )
 
@@ -62,19 +97,63 @@ def _get_vectorstore() -> Chroma:
 
 
 def get_llm(model: str | None = None, temperature: float | None = None) -> ChatOllama:
-    """Build the chat model from config (or explicit overrides from the UI)."""
+    """Build the chat model from config (or explicit overrides from the UI).
+
+    ``num_ctx`` comes from config so the retrieved context (top_k chunks of
+    up to 2600 chars) plus chat history fits the model's window.
+    """
     cfg = load_config()
     return ChatOllama(
         model=model or cfg["model"],
         temperature=cfg["temperature"] if temperature is None else temperature,
+        num_ctx=cfg["num_ctx"],
     )
 
 
-def retrieve(query: str, k: int | None = None) -> list[Document]:
-    """Similarity search over the ingested docs; top_k from config if not given."""
+@lru_cache(maxsize=1)
+def type_counts() -> dict[str, int]:
+    """Chunk count per entity type in the store (cached per process).
+
+    ~25–35 ms for 1,285 rows; cached so Streamlit reruns do not rescan.
+    Call `reset_caches()` after re-ingesting.
+    """
+    metadatas = _get_vectorstore().get(include=["metadatas"]).get("metadatas") or []
+    return dict(Counter(m.get("type", "ingredient") for m in metadatas))
+
+
+def scope_options() -> list[str]:
+    """Search-scope choices: known types first (TYPE_ORDER), then the rest."""
+    counts = type_counts()
+    known = [t for t in TYPE_ORDER if t in counts]
+    return known + sorted(t for t in counts if t not in TYPE_ORDER)
+
+
+def reset_caches() -> None:
+    """Drop cached vectorstore + type counts (after re-ingest)."""
+    _get_vectorstore.cache_clear()
+    type_counts.cache_clear()
+
+
+def type_filter(types: list[str] | None) -> dict | None:
+    """Chroma `where` clause for the search scope.
+
+    Empty/None means "no filter" — search every type. That is deliberate:
+    a cleared sidebar multiselect must not produce empty context.
+    """
+    cleaned = [t for t in (types or []) if t]
+    return {"type": {"$in": cleaned}} if cleaned else None
+
+
+def retrieve(query: str, k: int | None = None, types: list[str] | None = None) -> list[Document]:
+    """Similarity search; k from config when omitted, optional type scope.
+
+    A narrow scope may legitimately return fewer than k documents (e.g. the
+    `table` type currently has 4 chunks).
+    """
     cfg = load_config()
-    top_k = k or cfg["top_k"]
-    return _get_vectorstore().similarity_search(query, k=top_k)
+    return _get_vectorstore().similarity_search(
+        query, k=k or cfg["top_k"], filter=type_filter(types)
+    )
 
 
 def _norm_source(source: str) -> str:
@@ -82,7 +161,7 @@ def _norm_source(source: str) -> str:
     return source.replace("\\", "/")
 
 
-def get_retrieved_sources(query: str, k: int | None = None) -> list[dict]:
+def docs_to_sources(docs: list[Document]) -> list[dict]:
     """Retrieved chunks as plain dicts for the UI's 'show sources' panel."""
     return [
         {
@@ -91,8 +170,15 @@ def get_retrieved_sources(query: str, k: int | None = None) -> list[dict]:
             "title": d.metadata.get("title", "?"),
             "content": d.page_content,
         }
-        for d in retrieve(query, k)
+        for d in docs
     ]
+
+
+def get_retrieved_sources(
+    query: str, k: int | None = None, types: list[str] | None = None
+) -> list[dict]:
+    """Retrieved chunks as plain dicts (kept for tests/back-compat)."""
+    return docs_to_sources(retrieve(query, k, types))
 
 
 def format_context(docs: list[Document]) -> str:
@@ -107,8 +193,12 @@ def format_context(docs: list[Document]) -> str:
     return "\n\n".join(blocks)
 
 
-def _build_messages(question: str, history: list[tuple[str, str]] | None) -> list:
-    docs = retrieve(question)
+def _build_messages(
+    question: str,
+    history: list[tuple[str, str]] | None,
+    docs: list[Document] | None = None,
+) -> list:
+    docs = retrieve(question) if docs is None else docs
     return PROMPT.format_messages(
         history=history or [],
         question=question,
@@ -121,9 +211,10 @@ def stream_answer(
     history: list[tuple[str, str]] | None = None,
     model: str | None = None,
     temperature: float | None = None,
+    docs: list[Document] | None = None,
 ):
-    """Yield answer tokens for streaming into Streamlit."""
-    messages = _build_messages(question, history)
+    """Yield answer tokens. Pass `docs` to reuse an already-filtered retrieval."""
+    messages = _build_messages(question, history, docs)
     llm = get_llm(model, temperature)
     for chunk in llm.stream(messages):
         content = chunk.content
@@ -141,13 +232,15 @@ def ask(
     history: list[tuple[str, str]] | None = None,
     model: str | None = None,
     temperature: float | None = None,
+    types: list[str] | None = None,
 ) -> tuple[str, list[dict]]:
     """Non-streaming convenience: full answer + retrieved sources (for tests)."""
-    messages = _build_messages(question, history)
+    docs = retrieve(question, types=types)
+    messages = _build_messages(question, history, docs)
     answer = get_llm(model, temperature).invoke(messages).content
     if isinstance(answer, list):
         answer = "".join(
             part.get("text", "") if isinstance(part, dict) else str(part)
             for part in answer
         )
-    return answer, get_retrieved_sources(question)
+    return answer, docs_to_sources(docs)

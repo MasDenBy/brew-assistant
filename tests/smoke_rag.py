@@ -37,3 +37,15 @@ print(f"Q: {ADV}")
 print(f"A: {adv_answer[:300]}")
 assert adv_answer.strip(), "Empty answer for out-of-scope question"
 print("Adversarial check done (answer is grounded/graceful).")
+
+# Scoped retrieval: the search scope must reach the answer context too
+print("=" * 60)
+scoped_answer, scoped_sources = ask(QUESTION, types=["hop"])
+print(f"Q (scope=hop): {QUESTION}")
+print(f"A: {scoped_answer[:300]}")
+print("Scoped sources:")
+for s in scoped_sources:
+    print(f"  [{s['type']}] {s['source']}")
+assert scoped_answer.strip(), "Empty answer for scoped question"
+assert scoped_sources and all(s["type"] == "hop" for s in scoped_sources), scoped_sources
+print("Scoped check done (only hop docs retrieved).")
