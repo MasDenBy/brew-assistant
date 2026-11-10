@@ -7,8 +7,8 @@ models:                                # chat candidates for the sidebar dropdow
   qwen3.5:9b:   {}
   mistral:7b:   {}                     # example override: { temperature: 0.2 }
 temperature: 0.3
-top_k: 6                             # Phase 2: raised 4 -> 6 (store grows 5x+)
-num_ctx: 8192                        # Ollama context window: 6 x 2600-char chunks fit with history headroom
+top_k: 8                             # Phase 2: raised 4 -> 6 -> 8 (store now ~1.7k chunks; forward-substitute hop docs like hop-cascade.md rank 8th behind reverse substitution rows)
+num_ctx: 8192                        # Ollama context window: 8 x ~2600-char chunks (~5200 tokens) fit with history headroom
 data_dir: data                        # legacy single-dir key (tests/older scripts)
 data_dirs:                            # ingest reads fixtures + collected data
   - data                              # repo fixtures (+ self-authored CSV tables) — chat works without collectors

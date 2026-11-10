@@ -50,8 +50,7 @@ def test_not_refusals() -> None:
     # normal grounded answers
     assert not is_refusal("The attenuation of WLP029 is 72% - 78%.")
     assert not is_refusal(
-        "Munich malt can be substituted with Vienna malt "
-        "[source: tables/ingredient-substitutions.csv]."
+        "Munich malt can be substituted with Vienna malt [1]."
     )
 
     # phrase merely mentioned mid-answer: not a refusal

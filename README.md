@@ -20,7 +20,7 @@ machine.
 - 🔎 **Search scope** filter by document type (sidebar multiselect)
 - 🤖 **Model selector** in the sidebar — a curated candidate list from `config.yaml`
   (`models:`), or every model pulled into Ollama; labels unpulled candidates
-- 📝 **Inline citations** in answers (`[source: path/to/doc.md]`) plus a collapsible sources panel
+- 📝 **Inline citations** in answers (`[1]`, `[2]` — numbered like the context blocks) plus a collapsible sources panel with matching numbers
 - 🏷️ Per-answer **model provenance** (`model · T=…`) and a notice when switching models mid-chat
 - ⚙️ Temperature and Top-K controls, re-ingest button; per-model overrides (`temperature`, `num_ctx`)
 - ✅ 23-question evaluation suite with keyword scoring and a citation audit
@@ -93,7 +93,7 @@ Prompt: system rules + chat history + retrieved context blocks
 Ollama chat model (streaming)
    │
    ▼
-Answer with [source: …] citations + retrieved-sources panel
+Answer with [N] citations + numbered retrieved-sources panel
 ```
 
 Documents are chunked **by entity** (one hop/malt/yeast/style per chunk, one recipe per chunk,
@@ -293,14 +293,14 @@ CSV columns: `question, expected_keywords, actual_excerpt, pass_fail, notes`.
 - `|` separates **alternatives** within a group (any one matches)
 - `MANUAL` — not scored automatically
 
-The runner also audits every `[source: …]` citation and reports per row and in total:
+The runner also audits every `[N]` citation and reports per row and in total:
 
 | Verdict | Meaning |
 |---|---|
-| `OK` | The path exists in `data_dirs` and was retrieved this turn |
-| `ABBREVIATED` | Path missing on disk but a unique suffix of a retrieved path (e.g. dropping a collector folder) |
-| `PHANTOM` | Fabricated — not on disk and not a retrieved document |
-| `UNGROUNDED` | Exists on disk but was not retrieved this turn |
+| `OK` | The number is within the 1..k range of documents retrieved this turn |
+| `INVALID` | Out of range — an invented citation (retrieved docs are 1..k) |
+
+It also reports citation coverage (how many of the retrieved documents were cited).
 
 The citation audit is console-only and does not change pass/fail scoring.
 
