@@ -164,7 +164,7 @@ def main() -> None:
                     t = msg.get("temperature")
                     t_part = f" · T={t:g}" if isinstance(t, (int, float)) else ""
                     st.caption(f"model: {msg['model']}{t_part}")
-                if show_sources and msg.get("sources"):
+                if show_sources and msg.get("sources") and not msg.get("refused"):
                     render_sources(msg["sources"], msg.get("scope"))
 
     # ---------- New question ----------
@@ -192,13 +192,17 @@ def main() -> None:
             )
             t = float(temperature)
             st.caption(f"model: {model} · T={t:g}")
-            if show_sources:
+            # A refusal means the retrieved chunks did not contain the answer,
+            # so showing them would be misleading — render nothing but the text.
+            refused = rag.is_refusal(answer)
+            if show_sources and not refused:
                 render_sources(sources, scope)
 
         st.session_state.messages.append(
             {
                 "role": "assistant", "content": answer, "sources": sources,
                 "scope": scope, "model": model, "temperature": float(temperature),
+                "refused": refused,
             }
         )
 
