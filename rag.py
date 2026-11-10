@@ -31,6 +31,28 @@ TYPE_LABELS = {
     "ingredient": "Other ingredients",
 }
 
+# Canonical no-answer phrase. The system prompt makes the model start
+# refusals with it verbatim; app.py uses is_refusal() to detect it and hide
+# the (irrelevant) retrieved sources for such answers.
+REFUSAL_PHRASE = "i don't have that information"
+
+
+def is_refusal(text: str) -> bool:
+    """True when an answer is the canonical no-answer refusal.
+
+    Only the first line is inspected: trailing elaboration ("... about wine
+    yeasts") still counts, but an answer that merely mentions the phrase
+    mid-answer does not. Markdown list/quote/bold prefixes and typographic
+    apostrophes are normalized before matching.
+    """
+    stripped = (text or "").strip()
+    if not stripped:
+        return False
+    first_line = stripped.splitlines()[0]
+    first_line = first_line.lower().replace("\u2019", "'")
+    return first_line.lstrip("*#>- ").startswith(REFUSAL_PHRASE)
+
+
 SYSTEM_PROMPT = """\
 You are Brew Assistant, a knowledgeable home brewing expert helping home \
 brewers with beer styles, ingredients (hops, malts, yeasts), and substitutions.
@@ -44,8 +66,13 @@ names. When it is, quote those values exactly as written in the context.
 - Never sum, average, scale, or extrapolate quantities across entries. A \
 number that is not stated verbatim in the context is not in the context; say \
 so instead of computing one.
-- Only say "I don't have that information" if the context genuinely lacks \
-the answer — first make sure you have read the whole context.
+- If the context genuinely lacks the answer — after reading the whole context \
+carefully — reply with exactly "I don't have that information." as the very \
+first sentence. You may add one short sentence naming what kind of document \
+would help, and nothing else.
+- Never attach citations to a refusal: a reply starting with "I don't have \
+that information." must contain no [source: ...] citations, numbers, or \
+speculation about the answer.
 - Never invent numbers, yeast strain names, or filenames. If it is not in \
 the context, do not state it.
 - When you use information from a document, cite it inline as \
