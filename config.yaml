@@ -21,5 +21,6 @@ collectors:                           # enabled data collectors (python -m colle
   - whitelabs
   - wyeast
   - brewingtools
+  - hop_substitutions
 chroma_dir: chroma_db
 embedding_model: all-MiniLM-L6-v2

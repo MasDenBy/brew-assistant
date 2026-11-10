@@ -1482,6 +1482,245 @@ def main() -> None:
                 ba_collector.fetch_text = original_ba_fetch
             assert ba_kept.is_file(), f"{label}: fail-soft run wiped prior output"
 
+        # --- hop substitutions: synthetic chart pages, no network ---
+        import collectors.hop_substitutions_collector as hop_sub
+
+        gf_html = """
+        <html><body><div class="article-body"><table><tbody>
+        <tr><td><strong>Hop</strong></td><td><strong>Aroma/Flavour</strong></td>
+            <td><strong>Alpha</strong></td><td><strong>Type (Bittering/Aroma)</strong></td>
+            <td><strong>Substitutes</strong></td></tr>
+        <tr><td>Citra</td>
+            <td><ul><li>Grapefruit</li><li>Melon</li></ul></td>
+            <td>10%-15%</td><td>Dual Purpose</td>
+            <td><ul><li>Simcoe</li><li>Cascade, USA</li><li>Cascade, Hop Extract</li></ul></td></tr>
+        <tr><td>Cascade, USA</td>
+            <td><ul><li>Grapefruit</li><li>Floral</li></ul></td>
+            <td>4.5%-8.9%</td><td>Aroma</td>
+            <td><ul><li>cascade (US)</li><li>Amarillo</li></ul></td></tr>
+        <tr><td>Meridian</td>
+            <td><ul><li>Tropical</li></ul></td>
+            <td>5.%-6.5%</td><td>Aroma</td>
+            <td><ul><li>Citra</li></ul></td></tr>
+        <tr><td>Palisade, CRVO</td>
+            <td><ul><li>Apricot</li></ul></td>
+            <td>13%-15%</td><td>Aroma</td>
+            <td><ul><li>Willamette</li></ul></td></tr>
+        <tr><td>Centennial, Hop Extract</td>
+            <td><ul><li>Lemon</li></ul></td>
+            <td>48.8%</td><td>Dual Purpose</td>
+            <td><ul><li>Chinook</li></ul></td></tr>
+        </tbody></table></div></body></html>
+        """
+        geter_html = """
+        <html><body><table><thead>
+        <tr><th>Hop</th><th>Alpha Acid</th><th>Type</th><th>Substitutes</th></tr>
+        </thead><tbody>
+        <tr><td><span class="hop-name dual">Citra</span></td>
+            <td><span class="alpha mono">10%-15%</span></td>
+            <td><span class="pill dual">Dual Purpose</span></td>
+            <td><span class="subs"><span class="sub-hop aroma">Simcoe</span>
+                <span class="sep">&middot;</span> <span class="sub-hop aroma">Cascade</span></span></td></tr>
+        <tr><td><span class="hop-name aroma">Cascade, USA</span></td>
+            <td><span class="alpha mono">4.5%-8.9%</span></td>
+            <td><span class="pill aroma">Aroma</span></td>
+            <td><span class="subs"><span class="sub-hop dual">Amarillo</span></span></td></tr>
+        <tr><td><span class="hop-name aroma">Ekuanot (Equinox)</span></td>
+            <td><span class="alpha mono">14.5%-15.5%</span></td>
+            <td><span class="pill aroma">Aroma</span></td>
+            <td><span class="subs"><span class="sub-hop dual">Simcoe</span></span></td></tr>
+        </tbody></table></body></html>
+        """
+        mj_html = """
+        <html><body><table><tbody>
+        <tr><td><strong>Hop</strong></td><td><strong>Aroma/Flavour</strong></td>
+            <td><strong>Alpha</strong></td><td><strong>Type</strong></td>
+            <td><strong>Substitutes</strong></td></tr>
+        <tr><td style="border:solid">Chinook</td>
+            <td style="border:solid"><ul><li>Spicy</li></ul></td>
+            <td style="border:solid">12%-14%</td><td style="border:solid">Dual Purpose</td>
+            <td style="border:solid"><ul><li>Galena</li><li>Eukanot</li></ul></td></tr>
+        </tbody></table></body></html>
+        """
+        aha_html = """
+        <html><body>
+        <table><thead><tr><td>Hop Variety</td><td>Possible Hop Substitution</td></tr></thead>
+        <tbody>
+        <tr><td><strong>Galaxy</strong> (AUS)</td><td> Citra | Vic Secret</td></tr>
+        <tr><td><strong>Cascade</strong></td><td> Centennial | Simcoe</td></tr>
+        <tr><td><strong>Citra</strong></td><td> Galaxy (AUS) | Taurus (DEU)</td></tr>
+        </tbody></table>
+        <table><tbody>
+        <tr><td>Random</td><td>Not a hops table</td></tr>
+        </tbody></table>
+        <table><tbody>
+        <tr><td><strong>Nugget</strong>(USA)</td><td> Columbus | Horizon</td></tr>
+        </tbody></table>
+        </body></html>
+        """
+        gf_rows = hop_sub.parse_chart(gf_html, hop_sub.S_GRAINFATHER)
+        assert len(gf_rows) == 5, [r.name for r in gf_rows]
+        citra = gf_rows[0]
+        assert (citra.name, citra.alpha, citra.purpose) == ("Citra", "10%-15%", "Dual Purpose")
+        assert citra.aroma == ["Grapefruit", "Melon"], citra.aroma
+        assert citra.substitutes == [
+            "Simcoe",
+            "Cascade, USA",
+            "Cascade, Hop Extract",
+        ], citra.substitutes
+        meridian = gf_rows[2]
+        assert meridian.alpha == "5%-6.5%", meridian.alpha  # stray dot dropped
+        assert any(r.name == "Palisade, CRVO" for r in gf_rows)  # raw kept, merge drops
+
+        geter_rows = hop_sub.parse_finder(geter_html, hop_sub.S_GETERBREWED)
+        assert len(geter_rows) == 3, [r.name for r in geter_rows]
+        assert geter_rows[0].substitutes == ["Simcoe", "Cascade"], geter_rows[0].substitutes
+        assert geter_rows[0].alpha == "10%-15%"
+
+        mj_rows = hop_sub.parse_chart(mj_html, hop_sub.S_MANGROVE)
+        assert [r.name for r in mj_rows] == ["Chinook"], mj_rows
+        assert mj_rows[0].alpha == "12%-14%"
+
+        aha_rows = hop_sub.parse_aha(aha_html, hop_sub.S_AHA)
+        assert [r.name for r in aha_rows] == ["Galaxy", "Cascade", "Citra", "Nugget"], aha_rows
+        assert aha_rows[0].origin == "Australia", aha_rows[0].origin
+        assert aha_rows[0].substitutes == ["Citra", "Vic Secret"], aha_rows[0].substitutes
+        assert aha_rows[3].origin == "United States", aha_rows[3].origin
+
+        small_records = [*geter_rows, *gf_rows, *mj_rows, *aha_rows]
+        small_merged, small_unresolved = hop_sub.merge_records(small_records)
+        by_name = {e.name: e for e in small_merged}
+        assert "Palisade, CRVO" not in by_name, by_name.keys()
+        assert "Centennial, Hop Extract" not in by_name, by_name.keys()
+        assert by_name["Citra"].substitutes == [
+            "Simcoe",
+            "Cascade",
+            "Galaxy",
+            "Taurus",
+        ], by_name["Citra"].substitutes  # union; extract refs dropped; codes resolved
+        assert "Cascade, Hop Extract" not in by_name["Citra"].substitutes
+        assert by_name["Cascade"].substitutes == ["Amarillo", "Centennial", "Simcoe"], (
+            by_name["Cascade"].substitutes  # cascade (US) self-ref resolves out
+        )
+        assert by_name["Cascade"].alpha == "4.5%-8.9%"
+        assert by_name["Cascade"].sources == [
+            hop_sub.S_GETERBREWED,
+            hop_sub.S_GRAINFATHER,
+            hop_sub.S_AHA,
+        ], by_name["Cascade"].sources
+        assert by_name["Chinook"].substitutes == [
+            "Galena",
+            "Ekuanot (Equinox)",
+        ], by_name["Chinook"].substitutes  # "Eukanot" typo -> Ekuanot row
+        assert "Eukanot" not in small_unresolved, small_unresolved
+        assert by_name["Galaxy"].origin == "Australia", by_name["Galaxy"].origin
+        assert by_name["Nugget"].origin == "United States", by_name["Nugget"].origin
+        assert "Taurus" in small_unresolved, small_unresolved  # no row this small
+        assert by_name["Ekuanot (Equinox)"].name == "Ekuanot (Equinox)"
+
+        cascade_doc = hop_sub.render_hop(by_name["Cascade"])
+        assert cascade_doc.startswith("# Cascade Hops"), cascade_doc[:80]
+        assert "**Type:** Ingredient (Hop)" in cascade_doc
+        assert "**Purpose:** Aroma" in cascade_doc, cascade_doc
+        assert "**Alpha acid:** 4.5%-8.9%" in cascade_doc
+        assert "## Aroma\nGrapefruit, Floral" in cascade_doc, cascade_doc
+        assert "## Substitute hops\nAmarillo, Centennial, Simcoe" in cascade_doc, (
+            cascade_doc
+        )
+        assert f"- {hop_sub.S_GETERBREWED} — https://www.geterbrewed.com" in cascade_doc
+        assert "<" not in cascade_doc, cascade_doc
+        assert len(cascade_doc) <= 1900, len(cascade_doc)
+        assert cascade_doc.endswith("\n") and not cascade_doc.endswith("\n\n")
+        assert all(line == line.rstrip() for line in cascade_doc.splitlines())
+
+        assert hop_sub.hop_filename(by_name["Cascade"]) == "hop-cascade.md"
+        assert hop_sub.hop_filename(by_name["Galaxy"]) == "hop-galaxy.md"
+        dual = hop_sub.HopEntry(name="Same Slug")
+        assert hop_sub._unique_filename(
+            "hop-same-slug.md", {"hop-same-slug.md": "x"}
+        ) == "hop-same-slug-2.md"
+
+        # collector: bulk payloads for the floors, config fetch patched, no network
+        gf_bulk = "".join(
+            f"<tr><td>Chart GF Bulk {i:03d}</td>"
+            "<td><ul><li>Citrus</li></ul></td><td>5%-6%</td><td>Aroma</td>"
+            "<td><ul><li>Cascade</li></ul></td></tr>"
+            for i in range(hop_sub.MIN_CHART_ROWS + 1)
+        )
+        mj_bulk = "".join(
+            f"<tr><td>Chart MJ Bulk {i:03d}</td>"
+            "<td><ul><li>Spicy</li></ul></td><td>7%-9%</td><td>Bittering</td>"
+            "<td><ul><li>Galena</li></ul></td></tr>"
+            for i in range(hop_sub.MIN_CHART_ROWS + 1)
+        )
+        geter_bulk = "".join(
+            f'<tr><td><span class="hop-name aroma">Finder Bulk {i:03d}</span></td>'
+            '<td><span>5%-6%</span></td><td><span>Aroma</span></td>'
+            '<td><span class="subs"><span class="sub-hop">Cascade</span></span></td></tr>'
+            for i in range(hop_sub.MIN_FINDER_ROWS + 1)
+        )
+        aha_bulk = "".join(
+            f"<tr><td><strong>AHA Bulk {i:03d}</strong></td><td> Cascade</td></tr>"
+            for i in range(hop_sub.MIN_AHA_ROWS + 1)
+        )
+        source_urls = {label: url for label, url in hop_sub.SOURCES}
+        bulk_pages = {
+            source_urls[hop_sub.S_GETERBREWED]: geter_html.replace(
+                "</tbody>", geter_bulk + "</tbody>"
+            ),
+            source_urls[hop_sub.S_GRAINFATHER]: gf_html.replace(
+                "</tbody>", gf_bulk + "</tbody>"
+            ),
+            source_urls[hop_sub.S_MANGROVE]: mj_html.replace(
+                "</tbody>", mj_bulk + "</tbody>"
+            ),
+            source_urls[hop_sub.S_AHA]: aha_html + (
+                "<table><tbody>" + aha_bulk + "</tbody></table>"
+            ),
+        }
+        live_dest = tmp / "hop_substitutions_live"
+        original_hs_fetch = hop_sub.fetch
+        hop_sub.fetch = lambda url, **kwargs: bulk_pages[url].encode("utf-8")
+        try:
+            hs_written = hop_sub.HopSubstitutionsCollector().collect(live_dest)
+        finally:
+            hop_sub.fetch = original_hs_fetch
+        assert len(hs_written) >= hop_sub.MIN_MERGED, len(hs_written)
+        assert all(
+            p.parent == live_dest / "ingredients" for p in hs_written
+        ), hs_written[:2]
+        assert all(p.name.startswith("hop-") and p.name.endswith(".md") for p in hs_written)
+        cascades = live_dest / "ingredients" / "hop-cascade.md"
+        assert cascades.is_file(), sorted(p.name for p in (live_dest / "ingredients").iterdir())[:10]
+        assert "## Sources" in cascades.read_text(encoding="utf-8")
+
+        # fail soft: any unreachable page leaves prior output untouched
+        hs_soft_dest = tmp / "hop_substitutions_soft"
+        hs_kept = hs_soft_dest / "ingredients" / "hop-keep.md"
+        hs_kept.parent.mkdir(parents=True, exist_ok=True)
+        hs_kept.write_text("# keep\n", encoding="utf-8")
+
+        def _hs_offline(url, **kwargs):
+            raise SourceUnavailableError(f"offline: {url}")
+
+        hop_sub.fetch = _hs_offline
+        try:
+            try:
+                hop_sub.HopSubstitutionsCollector().collect(hs_soft_dest)
+            except SourceUnavailableError:
+                pass
+            else:
+                raise AssertionError("unreachable source must raise SourceUnavailableError")
+        finally:
+            hop_sub.fetch = original_hs_fetch
+        assert hs_kept.is_file(), "fail-soft run wiped prior hop output"
+
+        # naming rule with the mid-word underscore id (pinned below by loop)
+        hs_cls = hop_sub.HopSubstitutionsCollector
+        assert (
+            hs_cls.__module__.rsplit(".", 1)[-1] == f"{hs_cls.id}_collector"
+        ), hs_cls.id
+
         # registry
         assert "wyeast" in all_registered(), all_registered().keys()
         assert "brewingtools" in all_registered(), all_registered().keys()
@@ -1515,6 +1754,9 @@ def main() -> None:
         print("      the detail section, TOC ignored, whitespace collapse, dense")
         print("      statistics line, stats-less styles, styles/ files, idempotent,")
         print("      MIN_STYLES sanity guard, fail-soft, naming rule)")
+        print("      hop substitution charts (4-source table parsing, product rows")
+        print("      excluded, alias/typo repair, union merge with source votes,")
+        print("      per-hop one-chunk docs, hop- filenames, fail-soft, naming rule)")
     finally:
         shutil.rmtree(tmp, ignore_errors=True)
 
