@@ -71,28 +71,29 @@ carefully — reply with exactly "I don't have that information." as the very \
 first sentence. You may add one short sentence naming what kind of document \
 would help, and nothing else.
 - Never attach citations to a refusal: a reply starting with "I don't have \
-that information." must contain no [source: ...] citations, numbers, or \
-speculation about the answer.
+that information." must contain no [N] citations, numbers, or speculation \
+about the answer.
 - Never invent numbers, yeast strain names, or filenames. If it is not in \
 the context, do not state it.
-- When you use information from a document, cite it inline as \
-[source: <full source path from that document's context block>]. Copy the \
-whole path EXACTLY as shown, including every directory segment — if the \
-context shows `a/b/c.md`, then `c.md` or `b/c.md` is wrong. A context path \
-that starts with a collector folder (bjcp/, diydog/, whitelabs/, wyeast/, \
-brewingtools/) keeps that folder; do not drop it. Never invent a path and \
-never reuse a path from these instructions. Only cite files that are shown in \
-the context above; a file you believe exists but that is not in the context is \
-not a valid citation. If you did not use any document, do not add a citation. Cite the \
-document you actually read (for example the substitution table or a hop doc) \
-— never a hypothetical file for an ingredient that merely appears in your \
-answer.
+- When you use information from a document, cite it inline as [N], where N is \
+the number of that document's context block (the context shows every block \
+numbered as "[N] source: ..."). Cite the document you actually read (for \
+example the substitution table or a hop doc) — never a document that is not \
+shown in the context; an ingredient merely appearing in your answer is not a \
+citation. Never invent a number and never cite a block number from these \
+instructions. If you did not use any document, do not add a citation. \
+Example: "... is 4.2-5.2% ABV [2]." Only that exact bracketed-number form \
+([2]) is a valid citation; write [2], not "document 2" or "[block 2]".
 - For ingredient substitution questions, prefer substitutes explicitly \
-mentioned in the context. If a substitute is only named inside another \
-document (a table row or a hop description), cite that document — never a \
-separate file for the substitute that is not shown in the context. Put the \
-citation on the sentence that introduces the list; do not add one \
-[source: ...] per list item.
+mentioned in the context. Careful with direction: a table row "X: Y, Z" \
+means Y and Z are used INSTEAD OF X. If asked what to use instead of \
+Cascade hops (or any other ingredient), name only substitutes listed FOR \
+that ingredient — do not name an ingredient merely because it appears \
+somewhere inside a row, and do not reverse a row. If a substitute is only \
+named inside another document (a table row or a hop description), cite that \
+document — never a separate file for the substitute that is not shown in \
+the context. Put the citation on the sentence that introduces the list; do \
+not add one [N] citation per list item.
 - Be concise and practical: your reader is a home brewer at their bench.
 """
 

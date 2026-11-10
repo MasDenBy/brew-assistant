@@ -65,12 +65,17 @@ def last_model_of(messages: list[dict]) -> str | None:
 
 
 def render_sources(sources: list[dict], scope: list[str] | None = None) -> None:
-    """Render retrieved chunks for one answer."""
+    """Render retrieved chunks for one answer.
+
+    Entries are numbered to match the [N] inline citations: docs are numbered
+    1..k by retrieval order, exactly like format_context() numbers the
+    prompt's context blocks.
+    """
     if scope:
         st.caption("searched: " + ", ".join(scope))
-    st.caption("Retrieved sources")
-    for s in sources:
-        with st.expander(f"[{s['type']}] {s['title']} — {s['source']}"):
+    st.caption("Retrieved sources — numbers match the [N] citations above")
+    for i, s in enumerate(sources, 1):
+        with st.expander(f"{i}. ({s['type']}) {s['title']} — {s['source']}"):
             st.markdown(s["content"])
 
 

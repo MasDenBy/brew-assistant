@@ -10,13 +10,14 @@ Run:
     .venv\\Scripts\\python.exe tests\\run_eval.py
     .venv\\Scripts\\python.exe tests\\run_eval.py --retrieval-only  # no LLM
 
-The citation audit is console-only and non-gating: every `[source: ...]` in an
-answer is checked against `data_dirs` on disk and against the documents
-retrieved for that turn. Verdicts: OK, ABBREVIATED (missing on disk but a
-unique suffix of a retrieved path, e.g. `ingredients/x.md` for
-`whitelabs/ingredients/x.md`), PHANTOM (not on disk and not a retrieved doc —
-a fabricated path), UNGROUNDED (on disk but not retrieved this turn).
-PASS/FAIL scoring is unchanged.
+Numbered citations [N] refer to the Nth retrieved document (format_context
+numbers the prompt's context blocks 1..k in retrieval order, and the UI's
+sources panel shows the same order). The citation audit is console-only and
+non-gating: every [N] in an answer is checked against the number of
+documents retrieved for that turn. Verdicts: OK (in 1..k range), INVALID
+(out of range — the model invented a citation). The audit also reports how
+many of the retrieved documents were never cited (coverage). PASS/FAIL
+scoring is unchanged.
 """
 import argparse
 import csv
@@ -27,16 +28,14 @@ from pathlib import Path
 ROOT = Path(__file__).resolve().parent.parent
 sys.path.insert(0, str(ROOT))
 
-from config import load_config  # noqa: E402
 from rag import ask, get_retrieved_sources  # noqa: E402
 
 CSV_PATH = ROOT / "tests" / "eval_questions.csv"
 EXCERPT_LEN = 350
 
-# Models sometimes append a markdown link after the citation, e.g.
-# "[source: a.md](source: a.md)" — the first `]` ends the capture, so the
-# following markdown never leaks into the path.
-CITATION_RE = re.compile(r"\[source:\s*([^\]]+)\]")
+# One marker may list several documents, e.g. "[2]" or "[1, 2]"; a marker
+# never contains "[source: ...]" text, so bracketed words are ignored.
+CITATION_RE = re.compile(r"\[(\d+(?:\s*,\s*\d+)*)\]")
 
 
 def score(answer: str, expected: str) -> str | None:
@@ -52,59 +51,25 @@ def score(answer: str, expected: str) -> str | None:
     return "PASS"
 
 
-def _norm_path(path: str) -> str:
-    """POSIX-style, no surrounding markdown/backticks — matches rag sources.
-
-    Model aberrations are cut down to the first path token: a bare
-    ``[source: a/b.md (source: a/b.md)]`` capture yields ``a/b.md``.
-    """
-    path = re.sub(r"^\s*source:\s*", "", path, flags=re.IGNORECASE).strip()
-    if not path:
-        return ""
-    path = path.split()[0]
-    return path.strip("`'\"*[]()").replace("\\", "/")
-
-
-def cited_paths(answer: str) -> list[str]:
-    """Citation paths in order of first appearance (one bracket may list many)."""
-    paths = []
+def cited_numbers(answer: str) -> list[int]:
+    """Cited document numbers in order of first appearance (no duplicates)."""
+    numbers = []
     for match in CITATION_RE.finditer(answer):
         for part in match.group(1).split(","):
-            path = _norm_path(part)
-            if path and path not in paths:
-                paths.append(path)
-    return paths
+            n = int(part)
+            if n not in numbers:
+                numbers.append(n)
+    return numbers
 
 
-def _on_disk(path: str, data_dirs: list[Path]) -> bool:
-    """True if the cited path exists under any configured data dir."""
-    return any((base / path).is_file() for base in data_dirs)
+def audit_citations(answer: str, sources: list[dict]) -> list[tuple[int, str]]:
+    """[(number, verdict)] for each cited number.
 
-
-def audit_citations(
-    answer: str, sources: list[dict], data_dirs: list[Path]
-) -> list[tuple[str, str, str | None]]:
-    """[(path, verdict, resolved)] for each cited path.
-
-    verdict is 'OK' | 'ABBREVIATED' | 'PHANTOM' | 'UNGROUNDED'; `resolved` is
-    the retrieved source an ABBREVIATED path stands for, else None.
+    verdict is 'OK' (1..k of this turn's retrieved docs) or 'INVALID'
+    (out of range — an invented citation).
     """
-    retrieved = {_norm_path(s["source"]) for s in sources}
-    findings = []
-    for path in cited_paths(answer):
-        resolved = None
-        if not _on_disk(path, data_dirs):
-            matches = [r for r in retrieved if r.endswith("/" + path)]
-            if len(matches) == 1:
-                verdict, resolved = "ABBREVIATED", matches[0]
-            else:
-                verdict = "PHANTOM"
-        elif path not in retrieved:
-            verdict = "UNGROUNDED"
-        else:
-            verdict = "OK"
-        findings.append((path, verdict, resolved))
-    return findings
+    k = len(sources)
+    return [(n, "OK" if 1 <= n <= k else "INVALID") for n in cited_numbers(answer)]
 
 
 def main() -> None:
@@ -115,9 +80,6 @@ def main() -> None:
         help="print top-k (type, source) per question without calling the LLM",
     )
     args = parser.parse_args()
-
-    cfg = load_config()
-    data_dirs = cfg.get("data_dirs") or [cfg.get("data_dir", ROOT / "data")]
 
     with open(CSV_PATH, newline="", encoding="utf-8") as f:
         rows = list(csv.DictReader(f))
@@ -130,7 +92,7 @@ def main() -> None:
         return
 
     results = []
-    citation_totals = {"OK": 0, "ABBREVIATED": 0, "PHANTOM": 0, "UNGROUNDED": 0}
+    citation_totals = {"OK": 0, "INVALID": 0}
     for i, row in enumerate(rows, 1):
         q = row["question"]
         print(f"[{i}/{len(rows)}] {q}")
@@ -141,20 +103,20 @@ def main() -> None:
         results.append(verdict)
         print(f"    -> {row['pass_fail']}: {row['actual_excerpt'][:120]}...")
 
-        findings = audit_citations(answer, sources, data_dirs)
+        findings = audit_citations(answer, sources)
         row_counts = dict.fromkeys(citation_totals, 0)
-        for path, citation_verdict, resolved in findings:
+        for _, citation_verdict in findings:
             citation_totals[citation_verdict] += 1
             row_counts[citation_verdict] += 1
-        print(
-            "    citations: {OK} ok, {ABBREVIATED} abbreviated, "
-            "{PHANTOM} phantom, {UNGROUNDED} ungrounded".format(**row_counts)
+        printed = (
+            "    citations: {OK} ok, {INVALID} invalid".format(**row_counts)
         )
-        for path, citation_verdict, resolved in findings:
-            if citation_verdict == "ABBREVIATED":
-                print(f"      ABBREVIATED: {path} -> {resolved}")
-            elif citation_verdict != "OK":
-                print(f"      {citation_verdict}: {path}")
+        if sources:
+            printed += f"; cited {len(findings)}/{len(sources)} retrieved docs"
+        print(printed)
+        for n, citation_verdict in findings:
+            if citation_verdict != "OK":
+                print(f"      INVALID: [{n}] (retrieved docs are 1..{len(sources)})")
 
     with open(CSV_PATH, "w", newline="", encoding="utf-8") as f:
         writer = csv.DictWriter(
@@ -169,10 +131,7 @@ def main() -> None:
     manual = results.count(None)
     print("-" * 60)
     print(f"TOTAL: {passed} pass, {failed} fail, {manual} manual review")
-    print(
-        "citations: {OK} ok, {ABBREVIATED} abbreviated, {PHANTOM} phantom, "
-        "{UNGROUNDED} ungrounded".format(**citation_totals)
-    )
+    print("citations: {OK} ok, {INVALID} invalid".format(**citation_totals))
     if failed:
         print("FAILING QUESTIONS:")
         for row in rows:
