@@ -18,9 +18,11 @@ machine.
 - 💬 Streamlit chat with streaming answers
 - 📚 RAG over styles, BJCP guidelines, hops, malts, yeasts, recipes, and reference tables
 - 🔎 **Search scope** filter by document type (sidebar multiselect)
-- 🤖 **Model selector** in the sidebar — any model pulled into Ollama
+- 🤖 **Model selector** in the sidebar — a curated candidate list from `config.yaml`
+  (`models:`), or every model pulled into Ollama; labels unpulled candidates
 - 📝 **Inline citations** in answers (`[source: path/to/doc.md]`) plus a collapsible sources panel
-- ⚙️ Temperature and Top-K controls, re-ingest button
+- 🏷️ Per-answer **model provenance** (`model · T=…`) and a notice when switching models mid-chat
+- ⚙️ Temperature and Top-K controls, re-ingest button; per-model overrides (`temperature`, `num_ctx`)
 - ✅ 23-question evaluation suite with keyword scoring and a citation audit
 
 ---
@@ -108,6 +110,7 @@ root; absolute paths (e.g. a UNC share) are used as-is.
 | Key | Default | Purpose |
 |---|---|---|
 | `model` | `qwen2.5:7b` | Ollama model name. **The only place the model is configured.** |
+| `models` | absent | Chat candidates for the sidebar dropdown: a map of model name → optional per-model overrides (`temperature`, `num_ctx`). Row order = dropdown order. Absent → dropdown lists every pulled model. |
 | `temperature` | `0.3` | Generation temperature (sidebar slider overrides per session) |
 | `top_k` | `6` | Chunks retrieved per question (sidebar slider overrides per session) |
 | `num_ctx` | `8192` | Ollama context window — fits `top_k` chunks plus chat history |
@@ -120,9 +123,13 @@ root; absolute paths (e.g. a UNC share) are used as-is.
 
 ### Sidebar controls
 
-- **Ollama model** — populated from Ollama's `/api/tags`; the `config.yaml` default is
-  preselected. The choice applies to the current session only.
-- **Temperature** / **Top-K documents** — per-session overrides of the config values.
+- **Ollama model** — populated from the `models:` shortlist in `config.yaml` when present
+  (pulled candidates first, unpulled ones labeled `(not installed)`); otherwise from Ollama's
+  `/api/tags` with the configured default preselected. The choice applies to the current
+  session only.
+- **Temperature** — each model gets a fresh slider defaulting to its effective temperature
+  (per-model override, else global); the slider overrides per session.
+- **Top-K documents** — per-session override of the config value.
 - **Search scope** — only retrieve the selected document types. Leave it empty to search
   everything. Counts per type are shown next to each label.
 - **Show sources** — toggle the retrieved-chunk panel under each answer.
@@ -147,8 +154,29 @@ The model name lives **only** in `config.yaml`. Swapping models requires no code
    model: llama3.1:8b
    ```
 
-3. Restart the app (`streamlit run app.py`). The sidebar dropdown lists every model Ollama has
-   and preselects the configured one.
+3. Restart the app (`streamlit run app.py`). The sidebar dropdown lists the configured model
+   and every other Ollama model.
+
+### Curating the candidate list
+
+To make model comparison easy, first fill in the candidate list in `config.yaml` — the
+dropdown then shows exactly these models (pulled ones first, unpulled ones labeled
+`(not installed)`):
+
+```yaml
+model: qwen2.5:7b
+models:
+  qwen2.5:7b:   { num_ctx: 8192 }
+  gemma4:12b:   {}
+  qwen3.5:9b:   {}
+  mistral:7b:   { temperature: 0.2 }   # optional per-model overrides
+```
+
+Each key's value may override `temperature` and `num_ctx` for that model; anything not
+overridden falls through to the global setting. Delete the `models:` key to go back to
+"every model pulled into Ollama". Every answer in the chat records the model that produced
+it (`model: … · T=…` under the answer), and switching models mid-conversation flags it —
+useful when comparing candidate models side by side.
 
 4. Verify that the configured model is actually serving answers:
 
@@ -284,6 +312,7 @@ The citation audit is console-only and does not change pass/fail scoring.
 | `tests/smoke_retrieval.py` | Store counts, type filter, source shape; exits 0 with `SKIP` if not ingested | Ingested store |
 | `tests/smoke_rag.py` | End-to-end answer + scoped retrieval for the Cascade question | Ollama + ingested store |
 | `tests/smoke_collectors.py` | Registry, namespace rule, runner statuses, HTML→markdown, archive extraction | Nothing (offline, no real sources) |
+| `tests/test_model_selection.py` | `models:` merge, dropdown candidates, switch detection, `get_llm` precedence | Nothing (offline, no Ollama) |
 | `tests/verify_model_swap.py` | Config-only model swap is actually served | Ollama + ingested store |
 
 ---
@@ -318,6 +347,7 @@ brew-assistant/
 
 | Symptom | Fix |
 |---|---|
+| Sidebar lists only unpulled candidates as `(not installed)` | Those `models:` entries are not pulled in Ollama yet: `ollama pull <name>` (check the exact tag with `ollama list`). |
 | Sidebar lists only the configured model | Ollama is not reachable at `http://localhost:11434`. Start it (`ollama serve`, or the Ollama app) and reload the page. |
 | `Search scope: run ingestion to enable type filtering` | `chroma_db/` is empty or missing — run `python ingest.py`. |
 | Answers ignore your new files | Re-ingest (`python ingest.py` or the sidebar button) after changing `data_dirs`. |

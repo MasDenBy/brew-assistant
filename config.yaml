@@ -1,6 +1,11 @@
 # Brew Assistant configuration.
 # The Ollama model name lives ONLY here — never hardcode it in business logic.
 model: qwen2.5:7b
+models:                                # chat candidates for the sidebar dropdown
+  qwen2.5:7b:   { num_ctx: 8192 }      # per-model overrides; mere presence of a key marks it as a candidate
+  gemma4:12b:   {}                     # add more pulled models here; `model:` stays the startup default
+  qwen3.5:9b:   {}
+  mistral:7b:   {}                     # example override: { temperature: 0.2 }
 temperature: 0.3
 top_k: 6                             # Phase 2: raised 4 -> 6 (store grows 5x+)
 num_ctx: 8192                        # Ollama context window: 6 x 2600-char chunks fit with history headroom
