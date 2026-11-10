@@ -31,3 +31,14 @@ def load_config() -> dict:
             for entry in cfg["data_dirs"]
         ]
     return cfg
+
+
+def model_settings(cfg: dict, name: str) -> dict:
+    """Effective settings for one chat model (per-model overrides over globals).
+
+    `cfg["models"]` maps a model name to experimental overrides for the keys it
+    carries (`temperature`, `num_ctx`, …); every other global key falls through.
+    Unknown model names get the global settings unchanged.
+    """
+    overrides = (cfg.get("models") or {}).get(name) or {}
+    return {key: overrides.get(key, cfg[key]) for key in ("temperature", "num_ctx")}

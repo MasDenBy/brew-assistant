@@ -11,7 +11,7 @@ from langchain_core.prompts import ChatPromptTemplate
 from langchain_huggingface import HuggingFaceEmbeddings
 from langchain_ollama import ChatOllama
 
-from config import load_config
+from config import load_config, model_settings
 
 COLLECTION_NAME = "brew_docs"
 
@@ -99,14 +99,17 @@ def _get_vectorstore() -> Chroma:
 def get_llm(model: str | None = None, temperature: float | None = None) -> ChatOllama:
     """Build the chat model from config (or explicit overrides from the UI).
 
-    ``num_ctx`` comes from config so the retrieved context (top_k chunks of
-    up to 2600 chars) plus chat history fits the model's window.
+    Precedence for `temperature`: explicit argument (UI slider) -> per-model
+    override in config.yaml `models:` -> global `temperature`. `num_ctx` is
+    config-only (per-model override, else global) — a VRAM decision, not a
+    per-question one, so the UI does not expose it.
     """
     cfg = load_config()
+    settings = model_settings(cfg, model or cfg["model"])
     return ChatOllama(
         model=model or cfg["model"],
-        temperature=cfg["temperature"] if temperature is None else temperature,
-        num_ctx=cfg["num_ctx"],
+        temperature=settings["temperature"] if temperature is None else temperature,
+        num_ctx=settings["num_ctx"],
     )
 
 

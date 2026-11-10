@@ -9,7 +9,7 @@ import requests
 import streamlit as st
 
 import rag
-from config import load_config
+from config import load_config, model_settings
 from ingest import main as ingest_main
 
 OLLAMA_TAGS_URL = "http://localhost:11434/api/tags"
@@ -23,6 +23,45 @@ def list_ollama_models() -> list[str]:
         return sorted(m["name"] for m in resp.json().get("models", []))
     except Exception:
         return []
+
+
+def model_choices(installed: list[str], cfg: dict) -> list[str]:
+    """Dropdown candidates, in order.
+
+    With `models:` in config.yaml: its keys first (pulled before unpulled, both
+    in config order — the row order is the user's shortlist), then any other
+    installed models. Unpulled candidates stay visible so selecting one
+    surfaces Ollama's clear error instead of silently hiding it. The default
+    (`model:`) is always present for selection.
+
+    Without `models:` this is the previous behavior: every installed model,
+    config default inserted first.
+    """
+    listed = list(cfg.get("models") or {})
+    if not listed:
+        names = list(installed)
+        if cfg["model"] not in names:
+            names.insert(0, cfg["model"])
+        return names
+    pulled = [name for name in listed if name in installed]
+    missing = [name for name in listed if name not in installed]
+    others = sorted(name for name in installed if name not in listed)
+    names = pulled + missing + others
+    if cfg["model"] not in names:
+        names.insert(0, cfg["model"])
+    return names
+
+
+def last_model_of(messages: list[dict]) -> str | None:
+    """Model that generated the most recent assistant message (or None)."""
+    return next(
+        (
+            m.get("model")
+            for m in reversed(messages)
+            if m["role"] == "assistant" and m.get("model")
+        ),
+        None,
+    )
 
 
 def render_sources(sources: list[dict], scope: list[str] | None = None) -> None:
@@ -47,14 +86,26 @@ def main() -> None:
         st.header("Settings")
 
         models = list_ollama_models()
-        default_model = cfg["model"]
-        if default_model not in models:
-            models = [default_model] + models
-        model = st.selectbox("Ollama model", models, index=models.index(default_model))
+        names = model_choices(models, cfg)
+        model = st.selectbox(
+            "Ollama model",
+            names,
+            index=names.index(cfg["model"]),
+            format_func=lambda n: n if n in models else f"{n} (not installed)",
+        )
+        if cfg.get("models"):
+            pulled = [n for n in cfg["models"] if n in models]
+            st.caption(
+                f"{len(pulled)}/{len(cfg['models'])} candidates pulled into Ollama"
+            )
 
+        # Keyed per model: switching models recreates the widget, so the slider
+        # re-defaults from that model's settings (per-model override > global).
         temperature = st.slider(
-            "Temperature", 0.0, 1.0, float(cfg["temperature"]), 0.05,
-            help="Lower = more deterministic",
+            "Temperature", 0.0, 1.0,
+            float(model_settings(cfg, model)["temperature"]), 0.05,
+            key=f"temperature_slider_{model}",
+            help="Lower = more deterministic; defaults follow the model's config.yaml override",
         )
         top_k = st.slider(
             "Top-K documents", 1, 8, int(cfg["top_k"]),
@@ -96,7 +147,10 @@ def main() -> None:
             st.session_state.messages = []
             st.rerun()
 
-        st.caption(f"Embedding: {cfg['embedding_model']} · ChromaDB: {cfg['chroma_dir'].name}/")
+        st.caption(
+            f"Embedding: {cfg['embedding_model']} · ChromaDB: {cfg['chroma_dir'].name}/"
+            f" · num_ctx: {int(model_settings(cfg, model)['num_ctx'])}"
+        )
 
     # ---------- Chat history ----------
     if "messages" not in st.session_state:
@@ -105,8 +159,13 @@ def main() -> None:
     for msg in st.session_state.messages:
         with st.chat_message(msg["role"]):
             st.markdown(msg["content"])
-            if msg["role"] == "assistant" and show_sources and msg.get("sources"):
-                render_sources(msg["sources"], msg.get("scope"))
+            if msg["role"] == "assistant":
+                if msg.get("model"):
+                    t = msg.get("temperature")
+                    t_part = f" · T={t:g}" if isinstance(t, (int, float)) else ""
+                    st.caption(f"model: {msg['model']}{t_part}")
+                if show_sources and msg.get("sources"):
+                    render_sources(msg["sources"], msg.get("scope"))
 
     # ---------- New question ----------
     if prompt := st.chat_input("Ask about beer styles, hops, malts, yeasts…"):
@@ -118,6 +177,12 @@ def main() -> None:
             (m["role"], m["content"]) for m in st.session_state.messages[:-1]
         ]
         with st.chat_message("assistant"):
+            prev_model = last_model_of(st.session_state.messages)
+            if prev_model and prev_model != model:
+                st.caption(
+                    f"⚠️ switched from {prev_model} to {model} — history above was"
+                    f" generated by {prev_model}"
+                )
             docs = rag.retrieve(prompt, k=top_k, types=scope)
             sources = rag.docs_to_sources(docs)
             answer = st.write_stream(
@@ -125,11 +190,16 @@ def main() -> None:
                     prompt, history, model=model, temperature=temperature, docs=docs
                 )
             )
+            t = float(temperature)
+            st.caption(f"model: {model} · T={t:g}")
             if show_sources:
                 render_sources(sources, scope)
 
         st.session_state.messages.append(
-            {"role": "assistant", "content": answer, "sources": sources, "scope": scope}
+            {
+                "role": "assistant", "content": answer, "sources": sources,
+                "scope": scope, "model": model, "temperature": float(temperature),
+            }
         )
 
 
