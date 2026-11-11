@@ -97,10 +97,10 @@ with the guideline name and a pure 1-2 sentence description, cited once on \
 the name line:
 
     1A American Light Lager (BJCP style) [1]
-    {short description}
+    {{short description}}
 
     Contemporary American-Style Light Lager (BA style) [2]
-    {short description}
+    {{short description}}
 
     Which style are you interested in?
 
