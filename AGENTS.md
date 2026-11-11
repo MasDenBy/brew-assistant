@@ -85,6 +85,41 @@ Answer to user (with source citations)
 7. **Cite sources.** Answers should reference which document(s) the information came from.
 8. **No fine-tuning in MVP.** Tuning means retrieval quality (chunk size, top-K, embedding model) and system prompt adjustments, not model training.
 
+### 6.1 Style disambiguation & citations (decided 2026-11-11)
+
+When the user asks about a beer style that exists in more than one guideline
+(e.g., "American Light Lager" in both BJCP and BA):
+
+- The model must NOT merge styles from different guidelines into one answer,
+  and must NOT combine their stats (ABV/IBU/SRM/gravity), even if similar.
+  Styles from different guidelines are separate entries.
+- Instead it replies with a short disambiguation list — one entry per matching
+  style, each with the guideline name and a pure 1–2 sentence description
+  (no key-stats block), cited once on the name line, ending with a clarifying
+  question ("Which style are you interested in?").
+- After the user picks a style, the answer covers only that one document.
+
+Citation density:
+- One [N] citation per paragraph/section (at its end), not after every sentence.
+- The substitution-list rule (one citation on the intro sentence, none per
+  list item) stays unchanged.
+
+Implementation notes:
+- Guideline origin is path-derived in `rag.py` (`guideline_of`: `bjcp/` →
+  BJCP, `ba/` → BA) and shown in the context block header
+  `(type: ..., guideline: BA)` plus the sources panel, so the model can
+  disambiguate without guessing from file paths. No re-ingestion required;
+  explicit `guideline` metadata in the collectors + re-ingest is the future
+  option if path-derivation proves fragile.
+- BA styles are labeled "Style guidelines (BA + repo)" in the sidebar scope
+  (previously the generic "Style docs (repo)").
+- Known follow-up: disambiguation relies on retrieval fetching BOTH guideline
+  docs in top-K. If one routinely drops out, add per-guideline coverage for
+  style queries (out of scope for now).
+- Eval: "Tell me about American Light Lager." in `tests/eval_questions.csv`
+  asserts both styles listed separately, one citation each, no merged stats,
+  ends with a clarifying question.
+
 ---
 
 ## 7. Recommended Immediate Next Steps

@@ -75,7 +75,8 @@ def render_sources(sources: list[dict], scope: list[str] | None = None) -> None:
         st.caption("searched: " + ", ".join(scope))
     st.caption("Retrieved sources — numbers match the [N] citations above")
     for i, s in enumerate(sources, 1):
-        with st.expander(f"{i}. ({s['type']}) {s['title']} — {s['source']}"):
+        label = s["type"] + (f", {s['guideline']} guideline" if s.get("guideline") else "")
+        with st.expander(f"{i}. ({label}) {s['title']} — {s['source']}"):
             st.markdown(s["content"])
 
 

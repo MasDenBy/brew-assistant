@@ -21,7 +21,7 @@ TYPE_ORDER = (
     "style", "bjcp_style", "hop", "malt", "yeast", "recipe", "table", "ingredient",
 )
 TYPE_LABELS = {
-    "style": "Style docs (repo)",
+    "style": "Style guidelines (BA + repo)",
     "bjcp_style": "BJCP guidelines",
     "hop": "Hops",
     "malt": "Malts",
@@ -82,8 +82,31 @@ example the substitution table or a hop doc) — never a document that is not \
 shown in the context; an ingredient merely appearing in your answer is not a \
 citation. Never invent a number and never cite a block number from these \
 instructions. If you did not use any document, do not add a citation. \
-Example: "... is 4.2-5.2% ABV [2]." Only that exact bracketed-number form \
-([2]) is a valid citation; write [2], not "document 2" or "[block 2]".
+Cite each document at most once per paragraph: place the [N] at the end of \
+the paragraph or list that presents that document's facts, not after every \
+sentence. Example: "... is 4.2-5.2% ABV [2]." Only that exact \
+bracketed-number form ([2]) is a valid citation; write [2], not "document 2" \
+or "[block 2]".
+- Style disambiguation: if the question asks about a beer style and the \
+context contains style descriptions from MORE THAN ONE style guideline \
+(e.g., BJCP and BA) that could match, do NOT merge them into one answer and \
+do NOT combine their stats (ABV, IBU, SRM, gravity), even when they look \
+similar. Styles from different guidelines are separate entries. Reply with \
+a short disambiguation list instead — one entry per matching style, each \
+with the guideline name and a pure 1-2 sentence description, cited once on \
+the name line:
+
+    1A American Light Lager (BJCP style) [1]
+    {short description}
+
+    Contemporary American-Style Light Lager (BA style) [2]
+    {short description}
+
+    Which style are you interested in?
+
+Finish that reply with a clarifying question such as "Which style are you \
+interested in?". Once the user picks a style (visible in the chat history), \
+answer only about that style and cite only its document.
 - For ingredient substitution questions, prefer substitutes explicitly \
 mentioned in the context. Careful with direction: a table row "X: Y, Z" \
 means Y and Z are used INSTEAD OF X. If asked what to use instead of \
@@ -192,6 +215,20 @@ def _norm_source(source: str) -> str:
     return source.replace("\\", "/")
 
 
+# Guideline origin derived from the collector namespace (first path segment
+# of the source, relative to the data dir). Explicit in the context header
+# and the sources panel so the model can disambiguate BJCP vs BA styles
+# without guessing from file paths. Path-derived for now; explicit metadata
+# in the collectors is the future option if this proves fragile.
+GUIDELINE_BY_DIR = {"bjcp": "BJCP", "ba": "BA"}
+
+
+def guideline_of(source: str) -> str | None:
+    """Style-guide origin for a source path ('BJCP'/'BA'), or None."""
+    first = _norm_source(source).split("/", 1)[0].lower()
+    return GUIDELINE_BY_DIR.get(first)
+
+
 def docs_to_sources(docs: list[Document]) -> list[dict]:
     """Retrieved chunks as plain dicts for the UI's 'show sources' panel."""
     return [
@@ -199,6 +236,7 @@ def docs_to_sources(docs: list[Document]) -> list[dict]:
             "source": _norm_source(d.metadata.get("source", "?")),
             "type": d.metadata.get("type", "?"),
             "title": d.metadata.get("title", "?"),
+            "guideline": guideline_of(d.metadata.get("source", "")),
             "content": d.page_content,
         }
         for d in docs
@@ -220,7 +258,9 @@ def format_context(docs: list[Document]) -> str:
     for i, d in enumerate(docs, 1):
         src = _norm_source(d.metadata.get("source", "?"))
         dtype = d.metadata.get("type", "?")
-        blocks.append(f"[{i}] source: {src} (type: {dtype})\n{d.page_content}")
+        guideline = guideline_of(src)
+        label = f", guideline: {guideline}" if guideline else ""
+        blocks.append(f"[{i}] source: {src} (type: {dtype}{label})\n{d.page_content}")
     return "\n\n".join(blocks)
 
 
