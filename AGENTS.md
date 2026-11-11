@@ -105,6 +105,18 @@ Citation density:
   list item) stays unchanged.
 
 Implementation notes:
+- Deterministic disambiguation (rag.py, "Deterministic style disambiguation"):
+  the multi-guideline list is generated in CODE, not by the LLM. Prompt-only
+  disambiguation proved unstable across models (placeholder echo, copied
+  example wording, dropped entries, merged stats over 5 prompt variants).
+  `style_disambiguation_matches()` matches a question against style docs
+  (types `style`/`bjcp_style`) whose TITLE covers every content token of the
+  question (stopwords removed, naive singulars); with 2+ matches,
+  `disambiguation_reply()` emits the fixed list (title line + guideline +
+  one [N] retrieval-order citation, then 1-2 pure prose sentences from the
+  doc — BJCP "Overall impression" section preferred) ending with
+  "Which style are you interested in?". `ask()`/`stream_answer()` return it
+  directly; the LLM answers only after the user picks a style.
 - Guideline origin is path-derived in `rag.py` (`guideline_of`: `bjcp/` →
   BJCP, `ba/` → BA) and shown in the context block header
   `(type: ..., guideline: BA)` plus the sources panel, so the model can
@@ -116,6 +128,7 @@ Implementation notes:
 - Known follow-up: disambiguation relies on retrieval fetching BOTH guideline
   docs in top-K. If one routinely drops out, add per-guideline coverage for
   style queries (out of scope for now).
+- Unit tests: tests/test_style_disambiguation.py (fake docs, no LLM).
 - Eval: "Tell me about American Light Lager." in `tests/eval_questions.csv`
   asserts both styles listed separately, one citation each, no merged stats,
   ends with a clarifying question.

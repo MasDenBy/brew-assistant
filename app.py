@@ -191,13 +191,19 @@ def main() -> None:
                 )
             docs = rag.retrieve(prompt, k=top_k, types=scope)
             sources = rag.docs_to_sources(docs)
+            from_disambiguation = (
+                rag.disambiguation_reply(prompt, docs) is not None
+            )
             answer = st.write_stream(
                 rag.stream_answer(
                     prompt, history, model=model, temperature=temperature, docs=docs
                 )
             )
             t = float(temperature)
-            st.caption(f"model: {model} · T={t:g}")
+            if from_disambiguation:
+                st.caption("several styles match — pick one for the full details")
+            else:
+                st.caption(f"model: {model} · T={t:g}")
             # A refusal means the retrieved chunks did not contain the answer,
             # so showing them would be misleading — render nothing but the text.
             refused = rag.is_refusal(answer)
