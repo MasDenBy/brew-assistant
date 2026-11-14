@@ -54,6 +54,92 @@ def is_refusal(text: str) -> bool:
     return first_line.lstrip("*#>- ").startswith(REFUSAL_PHRASE)
 
 
+_CITATION_RE = re.compile(r"\[(\d+(?:\s*,\s*\d+)*)\]")
+
+
+def _parse_citation(marker: str) -> list[int]:
+    """[1, 2, 3] -> [1, 2, 3]."""
+    return [int(n.strip()) for n in marker.split(",")]
+
+
+def _format_citation(numbers: list[int]) -> str:
+    return f"[{', '.join(str(n) for n in numbers)}]"
+
+
+def normalize_citations(answer: str) -> str:
+    """Post-process an answer to reduce citation spam.
+
+    Rules applied per paragraph/list block:
+    - Collapse adjacent citations: ``[2] [3]`` -> ``[2, 3]``.
+    - Remove duplicate citations within the same block (second ``[2]`` drops).
+    - Strip all citations from a canonical refusal phrase.
+    - Preserve the order of first appearance within each block.
+    - Never invent new citations.
+    """
+    if not answer:
+        return answer
+
+    def process_block(block: str) -> str:
+        # Refusal block: strip every citation.
+        first_line = block.strip().splitlines()[0] if block.strip() else ""
+        cleaned_first = first_line.lower().replace("\u2019", "'").lstrip("*#>- ")
+        is_refusal_block = cleaned_first.startswith(REFUSAL_PHRASE)
+
+        # Pass 1: deduplicate and drop empty markers.
+        seen: set[int] = set()
+        fragments = []
+        last_end = 0
+        for match in _CITATION_RE.finditer(block):
+            numbers = _parse_citation(match.group(1))
+            before = block[last_end:match.start()]
+            if is_refusal_block:
+                fragments.append(before)
+                last_end = match.end()
+                continue
+            kept = [n for n in numbers if n not in seen]
+            seen.update(kept)
+            if kept:
+                fragments.append(before)
+                fragments.append(_format_citation(kept))
+            else:
+                # Dropped duplicate/refusal marker: swallow one preceding space.
+                fragments.append(before.rstrip(" "))
+            last_end = match.end()
+        fragments.append(block[last_end:])
+        text = "".join(fragments)
+
+        # Pass 2: collapse adjacent markers separated only by whitespace.
+        collapsed = []
+        last_end = 0
+        prev_nums: list[int] | None = None
+        prev_start = -1
+        for match in _CITATION_RE.finditer(text):
+            between = text[last_end:match.start()]
+            nums = _parse_citation(match.group(1))
+            if prev_nums is not None and between.strip() == "":
+                # Merge with the previous marker.
+                merged_set = set(prev_nums)
+                merged = list(prev_nums)
+                for n in nums:
+                    if n not in merged_set:
+                        merged.append(n)
+                        merged_set.add(n)
+                collapsed[-1] = _format_citation(merged)
+                prev_nums = merged
+            else:
+                collapsed.append(text[last_end:match.start()])
+                collapsed.append(_format_citation(nums))
+                prev_nums = nums
+            last_end = match.end()
+        collapsed.append(text[last_end:])
+        return "".join(collapsed)
+
+    # Process paragraph blocks separately so citations across paragraphs are
+    # preserved, but duplicates within a paragraph/list are collapsed.
+    blocks = answer.split("\n\n")
+    return "\n\n".join(process_block(b) for b in blocks)
+
+
 SYSTEM_PROMPT = """\
 You are Brew Assistant, a knowledgeable home brewing expert helping home \
 brewers with beer styles, ingredients (hops, malts, yeasts), and substitutions.
@@ -83,11 +169,13 @@ example the substitution table or a hop doc) — never a document that is not \
 shown in the context; an ingredient merely appearing in your answer is not a \
 citation. Never invent a number and never cite a block number from these \
 instructions. If you did not use any document, do not add a citation. \
-Cite each document at most once per paragraph: place the [N] at the end of \
-the paragraph or list that presents that document's facts, not after every \
-sentence. Example: "... is 4.2-5.2% ABV [2]." Only that exact \
-bracketed-number form ([2]) is a valid citation; write [2], not "document 2" \
-or "[block 2]".
+Only that exact bracketed-number form ([2]) is a valid citation; write [2], \
+not "document 2" or "[block 2]".\n- CITE ONCE PER PARAGRAPH. Place the citation at the end of the paragraph or \
+list that presents the facts, not after every sentence. Example of good \
+density: "American IPA is a hoppy, moderately strong ale [1]. It showcases \
+citrus, floral, or resinous American hop varieties [1]." — both sentences \
+share one [1] at the end of the paragraph.\n- DO NOT do this: "American IPA is hoppy [1]. It is moderately strong [1]. It \
+showcases American hops [1]." That is citation spam and is not allowed.
 - If the context contains style documents from MORE THAN ONE style \
 guideline (e.g., BJCP and BA) matching the question, do NOT merge them \
 into one answer and never combine or average their stats (ABV, IBU, SRM, \
@@ -114,7 +202,7 @@ PROMPT = ChatPromptTemplate.from_messages(
         # The retrieved context MUST be referenced here — a template variable
         # that is passed but never rendered is silently dropped (bug present
         # since Step 5: answers were model priors, not grounded content).
-        ("human", "Context documents:\n{context}\n\nQuestion: {question}"),
+        ("human", "Context documents:\n{context}\n\nQuestion: {question}\n\nRemember: cite each document at most once per paragraph/list."),
     ]
 )
 
@@ -185,6 +273,38 @@ def type_filter(types: list[str] | None) -> dict | None:
     return {"type": {"$in": cleaned}} if cleaned else None
 
 
+def expand_query(query: str, history: list[tuple[str, str]] | None) -> str:
+    """Prepend recent conversation turns so ambiguous follow-ups retrieve better.
+
+    Short or pronoun-heavy follow-ups ("The BJCP one.", "How much Citra does
+    it use?") lack the entity names the retriever needs. Re-injecting the
+    most recent user question and the model's last answer keeps retrieval
+    grounded in the conversation without changing the chunking or vector
+    store.
+    """
+    if not history:
+        return query
+    # Prepend the previous user question; this gives short/pronoun follow-ups
+    # the entity names the retriever needs without pulling in the assistant's
+    # answer (which can bias retrieval toward its own keywords).
+    last_user = next(
+        (content for role, content in reversed(history) if role == "user"),
+        "",
+    )
+    if not last_user:
+        return query
+    # Avoid duplication if the user simply repeated the same question.
+    if last_user.strip().lower() == query.strip().lower():
+        return query
+    # Very short or selector-style follow-ups ("The BJCP one.") are better
+    # retrieved by the original question, which already names the entity.
+    # Longer follow-ups need both the entity name and the new detail.
+    stripped_query = query.strip()
+    if len(stripped_query) < 30:
+        return last_user
+    return f"{last_user} {stripped_query}"
+
+
 def retrieve(query: str, k: int | None = None, types: list[str] | None = None) -> list[Document]:
     """Similarity search; k from config when omitted, optional type scope.
 
@@ -251,17 +371,106 @@ def format_context(docs: list[Document]) -> str:
     return "\n\n".join(blocks)
 
 
+def _estimate_tokens(text: str) -> int:
+    """Simple character-based token heuristic: ~4 chars per token."""
+    return len(text) // 4
+
+
+def trim_history(
+    history: list[tuple[str, str]],
+    context_text: str,
+    question: str,
+    num_ctx: int,
+    reserved_response_tokens: int = 512,
+    max_history_turns: int | None = None,
+) -> list[tuple[str, str]]:
+    """Return the largest suffix of history that fits in the context window.
+
+    Budget reservation: system prompt, retrieved context, new question, and
+    response headroom are subtracted first; everything left is for history.
+    History is walked newest-to-oldest and the qualifying suffix is returned
+    in original order. ``max_history_turns`` caps turns even when the budget
+    would allow more (None/0 disables the cap).
+    """
+    history = history or []
+    if max_history_turns is not None and max_history_turns > 0:
+        history = history[-max_history_turns:]
+    if not history:
+        return []
+
+    fixed_tokens = (
+        _estimate_tokens(SYSTEM_PROMPT)
+        + _estimate_tokens(context_text)
+        + _estimate_tokens(question)
+        + reserved_response_tokens
+    )
+    budget = max(0, num_ctx - fixed_tokens)
+
+    # Walk newest-to-oldest, accumulate token count, then reverse the suffix.
+    kept: list[tuple[str, str]] = []
+    used = 0
+    for role, content in reversed(history):
+        cost = _estimate_tokens(content)
+        if used + cost > budget and kept:
+            # Stop once adding another turn would exceed the budget. The
+            # newest turn is always kept, even if it alone exceeds budget,
+            # so we never return an empty list when history is non-empty.
+            break
+        kept.append((role, content))
+        used += cost
+    return list(reversed(kept))
+
+
+def _history_settings(cfg: dict, model: str | None) -> tuple[int, int, int | None]:
+    """Resolve (num_ctx, reserved_response_tokens, max_history_turns)."""
+    settings = model_settings(cfg, model or cfg["model"])
+    num_ctx = settings["num_ctx"]
+    response_ratio = cfg.get("response_token_ratio", 0) or 0
+    reserved_response_tokens = max(512, int(num_ctx * response_ratio))
+    max_history_turns = cfg.get("max_history_turns") or None
+    return num_ctx, reserved_response_tokens, max_history_turns
+
+
+def history_turn_count(
+    history: list[tuple[str, str]],
+    question: str,
+    model: str | None = None,
+    docs: list[Document] | None = None,
+) -> int:
+    """Number of history turns that would be sent for this question."""
+    cfg = load_config()
+    num_ctx, reserved, max_turns = _history_settings(cfg, model)
+    context_text = format_context(docs) if docs is not None else ""
+    trimmed = trim_history(
+        history, context_text, question, num_ctx,
+        reserved_response_tokens=reserved, max_history_turns=max_turns,
+    )
+    return len(trimmed)
+
+
 def _build_messages(
     question: str,
     history: list[tuple[str, str]] | None,
     docs: list[Document] | None = None,
+    model: str | None = None,
 ) -> list:
     if docs is None:
         docs = retrieve(question)
+    cfg = load_config()
+    num_ctx, reserved, max_turns = _history_settings(cfg, model)
+    context_text = format_context(docs)
+    trimmed_history = trim_history(
+        history or [],
+        context_text,
+        question,
+        num_ctx,
+        reserved_response_tokens=reserved,
+        max_history_turns=max_turns,
+    )
     return PROMPT.format_messages(
-        history=history or [],
+        history=trimmed_history,
         question=question,
-        context=format_context(docs),
+        context=context_text,
     )
 
 
@@ -408,15 +617,20 @@ def stream_answer(
     temperature: float | None = None,
     docs: list[Document] | None = None,
 ):
-    """Yield answer tokens. Pass `docs` to reuse an already-filtered retrieval."""
-    docs = retrieve(question) if docs is None else docs
+    """Yield the final answer (normalized citations) as one string.
+
+    The full answer is buffered so citations can be post-processed before
+    display. Pass `docs` to reuse an already-filtered retrieval.
+    """
+    docs = retrieve(expand_query(question, history)) if docs is None else docs
     # Deterministic multi-guideline style disambiguation bypasses the LLM.
     reply = disambiguation_reply(question, docs)
     if reply is not None:
-        yield reply
+        yield normalize_citations(reply)
         return
-    messages = _build_messages(question, history, docs)
+    messages = _build_messages(question, history, docs, model=model)
     llm = get_llm(model, temperature)
+    pieces = []
     for chunk in llm.stream(messages):
         content = chunk.content
         if isinstance(content, list):  # models that emit content parts
@@ -425,7 +639,8 @@ def stream_answer(
                 for part in content
             )
         if content:
-            yield content
+            pieces.append(content)
+    yield normalize_citations("".join(pieces))
 
 
 def ask(
@@ -436,16 +651,17 @@ def ask(
     types: list[str] | None = None,
 ) -> tuple[str, list[dict]]:
     """Non-streaming convenience: full answer + retrieved sources (for tests)."""
-    docs = retrieve(question, types=types)
+    retrieval_query = expand_query(question, history)
+    docs = retrieve(retrieval_query, types=types)
     # Deterministic multi-guideline style disambiguation bypasses the LLM.
     reply = disambiguation_reply(question, docs)
     if reply is not None:
         return reply, docs_to_sources(docs)
-    messages = _build_messages(question, history, docs)
+    messages = _build_messages(question, history, docs, model=model)
     answer = get_llm(model, temperature).invoke(messages).content
     if isinstance(answer, list):
         answer = "".join(
             part.get("text", "") if isinstance(part, dict) else str(part)
             for part in answer
         )
-    return answer, docs_to_sources(docs)
+    return normalize_citations(answer), docs_to_sources(docs)
