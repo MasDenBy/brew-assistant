@@ -4,6 +4,7 @@ Model name/temperature/top_k come from config.yaml only — never hardcode them.
 """
 from collections import Counter
 from functools import lru_cache
+import re
 
 from langchain_chroma import Chroma
 from langchain_core.documents import Document
@@ -21,7 +22,7 @@ TYPE_ORDER = (
     "style", "bjcp_style", "hop", "malt", "yeast", "recipe", "table", "ingredient",
 )
 TYPE_LABELS = {
-    "style": "Style docs (repo)",
+    "style": "Style guidelines (BA + repo)",
     "bjcp_style": "BJCP guidelines",
     "hop": "Hops",
     "malt": "Malts",
@@ -82,8 +83,17 @@ example the substitution table or a hop doc) — never a document that is not \
 shown in the context; an ingredient merely appearing in your answer is not a \
 citation. Never invent a number and never cite a block number from these \
 instructions. If you did not use any document, do not add a citation. \
-Example: "... is 4.2-5.2% ABV [2]." Only that exact bracketed-number form \
-([2]) is a valid citation; write [2], not "document 2" or "[block 2]".
+Cite each document at most once per paragraph: place the [N] at the end of \
+the paragraph or list that presents that document's facts, not after every \
+sentence. Example: "... is 4.2-5.2% ABV [2]." Only that exact \
+bracketed-number form ([2]) is a valid citation; write [2], not "document 2" \
+or "[block 2]".
+- If the context contains style documents from MORE THAN ONE style \
+guideline (e.g., BJCP and BA) matching the question, do NOT merge them \
+into one answer and never combine or average their stats (ABV, IBU, SRM, \
+gravity): each guideline's style is a separate style. If the conversation \
+already listed the matching styles and the user has now picked one, \
+answer ONLY about that style and cite only its document.
 - For ingredient substitution questions, prefer substitutes explicitly \
 mentioned in the context. Careful with direction: a table row "X: Y, Z" \
 means Y and Z are used INSTEAD OF X. If asked what to use instead of \
@@ -192,6 +202,20 @@ def _norm_source(source: str) -> str:
     return source.replace("\\", "/")
 
 
+# Guideline origin derived from the collector namespace (first path segment
+# of the source, relative to the data dir). Explicit in the context header
+# and the sources panel so the model can disambiguate BJCP vs BA styles
+# without guessing from file paths. Path-derived for now; explicit metadata
+# in the collectors is the future option if this proves fragile.
+GUIDELINE_BY_DIR = {"bjcp": "BJCP", "ba": "BA"}
+
+
+def guideline_of(source: str) -> str | None:
+    """Style-guide origin for a source path ('BJCP'/'BA'), or None."""
+    first = _norm_source(source).split("/", 1)[0].lower()
+    return GUIDELINE_BY_DIR.get(first)
+
+
 def docs_to_sources(docs: list[Document]) -> list[dict]:
     """Retrieved chunks as plain dicts for the UI's 'show sources' panel."""
     return [
@@ -199,6 +223,7 @@ def docs_to_sources(docs: list[Document]) -> list[dict]:
             "source": _norm_source(d.metadata.get("source", "?")),
             "type": d.metadata.get("type", "?"),
             "title": d.metadata.get("title", "?"),
+            "guideline": guideline_of(d.metadata.get("source", "")),
             "content": d.page_content,
         }
         for d in docs
@@ -220,7 +245,9 @@ def format_context(docs: list[Document]) -> str:
     for i, d in enumerate(docs, 1):
         src = _norm_source(d.metadata.get("source", "?"))
         dtype = d.metadata.get("type", "?")
-        blocks.append(f"[{i}] source: {src} (type: {dtype})\n{d.page_content}")
+        guideline = guideline_of(src)
+        label = f", guideline: {guideline}" if guideline else ""
+        blocks.append(f"[{i}] source: {src} (type: {dtype}{label})\n{d.page_content}")
     return "\n\n".join(blocks)
 
 
@@ -229,12 +256,149 @@ def _build_messages(
     history: list[tuple[str, str]] | None,
     docs: list[Document] | None = None,
 ) -> list:
-    docs = retrieve(question) if docs is None else docs
+    if docs is None:
+        docs = retrieve(question)
     return PROMPT.format_messages(
         history=history or [],
         question=question,
         context=format_context(docs),
     )
+
+
+# ---------------------------------------------------------------------------
+# Deterministic style disambiguation
+#
+# Prompt-only disambiguation was unstable across models (placeholder echo,
+# copied example wording, dropped entries, merged stats). So the
+# multi-guideline disambiguation list is generated in code, without the LLM:
+# when the question's content tokens are all covered by the titles of TWO OR
+# MORE style documents (e.g., BJCP and BA), the reply is the fixed list of
+# those styles plus a clarifying question. The LLM only answers after the
+# user picks a style.
+# ---------------------------------------------------------------------------
+
+STYLE_TYPES = ("style", "bjcp_style")
+DISAMBIGUATION_QUESTION = "Which style are you interested in?"
+
+# Generic question words that never identify a style. "style" itself is
+# included even though BA titles contain it ("American-Style") — hyphen
+# splitting still lets title tokens match question tokens, it just stops the
+# question's generic "style" from diluting the match.
+_DISAMBIG_STOPWORDS = frozenset(
+    """
+    a about ale an and are as at be beer best brew brewer brewing but by can
+    compare come describes difference do does for from get give good have
+    history how i in into is it its like make me much my need of on one or
+    please recommend should so style styles than that the their them there
+    these they this to typical typical use used using want was well what
+    when which who why will with would you your tell
+    """.split()
+)
+
+
+def _tokens(text: str) -> frozenset:
+    """Content tokens of a question or title: lowercase words, stopwords
+    removed, naive singulars so 'lagers' matches title 'lager'."""
+    out = set()
+    for tok in re.findall(r"[a-z0-9]+", text.lower()):
+        if len(tok) < 2 or tok in _DISAMBIG_STOPWORDS:
+            continue
+        out.add(tok[:-1] if len(tok) > 3 and tok.endswith("s") else tok)
+    return frozenset(out)
+
+
+def style_disambiguation_matches(
+    question: str, docs: list[Document]
+) -> list[tuple[int, Document]]:
+    """[(retrieval index, doc)] for style docs whose title covers EVERY
+    content token of the question, in retrieval order.
+
+    Index is 1-based retrieval order so [N] citations in the reply match
+    format_context() and the UI sources panel (which both show the FULL
+    retrieved list, not just the style docs).
+    """
+    q_tokens = _tokens(question)
+    if not q_tokens:
+        return []
+    matches = []
+    for i, d in enumerate(docs, 1):
+        if d.metadata.get("type") not in STYLE_TYPES:
+            continue
+        title_tokens = _tokens(d.metadata.get("title", ""))
+        if title_tokens and q_tokens <= title_tokens:
+            matches.append((i, d))
+    return matches
+
+
+def _first_sentences(text: str, max_chars: int = 220, max_sentences: int = 2) -> str:
+    """First 1-2 sentences, capped at ~max_chars (never mid-word)."""
+    sentences = [s.strip() for s in re.split(r"(?<=[.!?])\s+", text) if s.strip()]
+    out = ""
+    for count, sentence in enumerate(sentences, 1):
+        out = f"{out} {sentence}".strip()
+        if count >= max_sentences or len(out) >= max_chars:
+            break
+    if len(out) > max_chars:
+        out = out[:max_chars].rsplit(" ", 1)[0].rstrip(",;:") + "…"
+    return out
+
+
+def _style_description(content: str) -> str:
+    """Pure prose impression of a style doc (no stats, no meta lines).
+
+    Prefers the BJCP 'Overall impression' section; otherwise the first prose
+    lines of the document, skipping headings, 'Key: value' meta lines, and
+    vital-statistics lines.
+    """
+    impression: list[str] = []
+    prose: list[str] = []
+    in_impression = False
+    for line in content.splitlines():
+        s = line.strip()
+        if not s:
+            continue
+        if s.startswith("#"):
+            heading = s.lstrip("#").strip().lower()
+            in_impression = "impression" in heading or "introduction" in heading
+            continue
+        if re.match(r"^[A-Z][\w &/']*: ", s):  # Category:/Family:/Source: meta
+            continue
+        if "OG:" in s or "IBU:" in s or re.match(r"^(OG|FG|ABV|IBU|Color)\b", s):
+            continue  # vital-statistics lines
+        if in_impression:
+            impression.append(s)
+        elif not prose:
+            prose.append(s)
+    if impression:
+        return _first_sentences(" ".join(impression))
+    return _first_sentences(" ".join(prose))
+
+
+def _style_name_line(title: str, guideline: str | None, index: int) -> str:
+    """'1A American Light Lager (BJCP style) [4]'.
+
+    [N] is the doc's retrieval index so the citation matches the sources
+    panel. The guideline suffix is added unless the title already carries it.
+    """
+    suffix = f" ({guideline} style)"
+    if not guideline or suffix.lower() in title.lower():
+        return f"{title} [{index}]"
+    return f"{title}{suffix} [{index}]"
+
+
+def disambiguation_reply(question: str, docs: list[Document]) -> str | None:
+    """The fixed multi-style disambiguation reply, or None when it does not
+    apply (fewer than two matching style docs)."""
+    matches = style_disambiguation_matches(question, docs)
+    if len(matches) < 2:
+        return None
+    entries = []
+    for i, d in matches:
+        src = _norm_source(d.metadata.get("source", "?"))
+        title = d.metadata.get("title") or src
+        name_line = _style_name_line(title, guideline_of(src), i)
+        entries.append(f"{name_line}\n{_style_description(d.page_content)}")
+    return "\n\n".join(entries) + f"\n\n{DISAMBIGUATION_QUESTION}"
 
 
 def stream_answer(
@@ -245,6 +409,12 @@ def stream_answer(
     docs: list[Document] | None = None,
 ):
     """Yield answer tokens. Pass `docs` to reuse an already-filtered retrieval."""
+    docs = retrieve(question) if docs is None else docs
+    # Deterministic multi-guideline style disambiguation bypasses the LLM.
+    reply = disambiguation_reply(question, docs)
+    if reply is not None:
+        yield reply
+        return
     messages = _build_messages(question, history, docs)
     llm = get_llm(model, temperature)
     for chunk in llm.stream(messages):
@@ -267,6 +437,10 @@ def ask(
 ) -> tuple[str, list[dict]]:
     """Non-streaming convenience: full answer + retrieved sources (for tests)."""
     docs = retrieve(question, types=types)
+    # Deterministic multi-guideline style disambiguation bypasses the LLM.
+    reply = disambiguation_reply(question, docs)
+    if reply is not None:
+        return reply, docs_to_sources(docs)
     messages = _build_messages(question, history, docs)
     answer = get_llm(model, temperature).invoke(messages).content
     if isinstance(answer, list):
