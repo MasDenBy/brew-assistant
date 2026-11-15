@@ -53,7 +53,7 @@ def main() -> None:
     cfg = load_config()
     assert len(cfg["data_dirs"]) == 2, cfg["data_dirs"]
     assert all(Path(d).is_absolute() for d in cfg["data_dirs"]), cfg["data_dirs"]
-    assert cfg["top_k"] == 6, cfg["top_k"]
+    assert cfg["top_k"] == 8, cfg["top_k"]   # raised 4 -> 6 -> 8 (see config.yaml)
 
     # --- fixtures only: deterministic regardless of collected_data/ ---
     docs = load_documents([FIXTURE_DIR])
