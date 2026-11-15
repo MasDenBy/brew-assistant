@@ -58,6 +58,17 @@ def main() -> int:
     print("-" * 20)
     print(f"{'TOTAL':<12} {sum(counts.values()):>6}")
 
+    # ---- exact part-number pinning (embeddings are blind to "OYL-042") ----
+    pinned = rag.part_number_docs("Tell me about a OYL-042 yeasts")
+    if pinned:
+        assert all("OYL-042" in d.page_content for d in pinned), [
+            d.metadata for d in pinned
+        ]
+        ranked = rag.retrieve("Tell me about a OYL-042 yeasts")
+        assert ranked, "part-number question retrieved nothing"
+        assert "oyl-042" in ranked[0].metadata.get("source", ""), ranked[0].metadata
+
+
     # ---- retrieval without a filter ----
     all_docs = rag.retrieve(QUERY, k=K)
     assert len(all_docs) == K, f"unfiltered k={K} returned {len(all_docs)}"

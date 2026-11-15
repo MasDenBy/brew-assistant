@@ -261,6 +261,8 @@ def reset_caches() -> None:
     """Drop cached vectorstore + type counts (after re-ingest)."""
     _get_vectorstore.cache_clear()
     type_counts.cache_clear()
+    _store_dump.cache_clear()
+    _part_index.cache_clear()
 
 
 def type_filter(types: list[str] | None) -> dict | None:
@@ -271,6 +273,119 @@ def type_filter(types: list[str] | None) -> dict | None:
     """
     cleaned = [t for t in (types or []) if t]
     return {"type": {"$in": cleaned}} if cleaned else None
+
+
+# ---------------------------------------------------------------------------
+# Exact part-number retrieval
+#
+# Embeddings carry no signal for opaque product codes ("OYL-042"): all
+# sibling strains of a lab embed nearly identically, so the specific strain
+# asked for can fall out of top-k entirely (verified: "Tell me about a
+# OYL-042 yeasts" retrieved 8 arbitrary Omega strains, not OYL-042). Product
+# numbers are therefore matched EXACTLY against the stored documents in
+# code, and the matching chunks are pinned at the front of the context.
+# ---------------------------------------------------------------------------
+
+# Product codes: OYL-042 / WLP300 / PIN-001Dry / us-05 (letters + optional
+# '-' + 2+ digits; no space, or "Wyeast 3068" would match "Wyeast 30"),
+# plus a bare 4-digit Wyeast-style number (3068, 2035-PC). A wrong match
+# requires an exact normalized-token collision with document content,
+# which plain question text does not produce.
+_PART_TOKEN_RE = re.compile(
+    r"\b[A-Za-z]{2,6}-?\d{2,6}[A-Za-z0-9]*\b|\b\d{4}(?:-PC)?\b",
+    re.IGNORECASE,
+)
+MAX_PINNED_DOCS = 4
+
+
+def _norm_part(token: str) -> str:
+    """``OYL-042`` / ``oyl 042`` / ``OYL042`` -> ``OYL042``."""
+    return re.sub(r"[^A-Za-z0-9]+", "", token).upper()
+
+
+@lru_cache(maxsize=1)
+def _store_dump() -> tuple[tuple[str, ...], tuple[dict, ...]]:
+    """All (document, metadata) pairs, cached per process (see type_counts)."""
+    data = _get_vectorstore().get(include=["documents", "metadatas"])
+    documents = tuple(data.get("documents") or [])
+    metadatas = tuple(data.get("metadatas") or [])
+    return documents, metadatas
+
+
+@lru_cache(maxsize=1)
+def _part_index() -> dict[str, tuple[tuple[int, int], ...]]:
+    """Normalized part token -> (priority, index) pairs into the dump.
+
+    Priority ranks HOW the token matched: 0 = the source filename contains
+    it (``yeast-3068-weihenstephan-weizen.md``), 1 = the chunk title, 2 =
+    anywhere in the text (a fixture doc that merely mentions "Wyeast 3068").
+    Lower priority wins; ties break on store order (earlier chunk first).
+    """
+    documents, metadatas = _store_dump()
+    best: dict[str, dict[int, int]] = {}
+    for i, (text, meta) in enumerate(zip(documents, metadatas)):
+        meta = meta or {}
+        stem = _norm_part(str(meta.get("source", "")).rsplit("/", 1)[-1])
+        title = _norm_part(str(meta.get("title", "")))
+        for token in _PART_TOKEN_RE.findall(text):
+            norm = _norm_part(token)
+            priority = 0 if norm in stem else 1 if norm in title else 2
+            slot = best.setdefault(norm, {})
+            if slot.get(i, 3) > priority:
+                slot[i] = priority
+    return {
+        key: tuple(sorted((p, i) for i, p in slots.items()))
+        for key, slots in best.items()
+    }
+
+
+def part_number_docs(query: str) -> list[Document]:
+    """Stored documents that exactly match a part number in ``query``.
+
+    Deterministic (no embedding): each product-code token in the question is
+    normalized and looked up in the store; filename matches rank above title
+    matches above plain mentions, one chunk per source, at most
+    :data:`MAX_PINNED_DOCS`.
+    """
+    tokens = {_norm_part(token) for token in _PART_TOKEN_RE.findall(query)}
+    if not tokens:
+        return []
+    documents, metadatas = _store_dump()
+    index = _part_index()
+    candidates = []
+    for token in sorted(tokens):
+        candidates.extend(index.get(token, ()))
+    candidates.sort()  # (priority, index): best match kind, earliest chunk
+
+    pinned: list[Document] = []
+    seen_sources: set[str] = set()
+    for _, i in candidates:
+        meta = metadatas[i] or {}
+        source = _norm_source(str(meta.get("source", "?")))
+        if source in seen_sources:
+            continue
+        seen_sources.add(source)
+        pinned.append(Document(page_content=documents[i], metadata=meta))
+        if len(pinned) >= MAX_PINNED_DOCS:
+            break
+    return pinned
+
+
+def merge_pinned(
+    docs: list[Document], pinned: list[Document], limit: int
+) -> list[Document]:
+    """Exact part-number matches first, then similarity hits (deduped by
+    source), trimmed to ``limit``."""
+    if not pinned:
+        return docs
+    pinned_sources = {
+        _norm_source(d.metadata.get("source", "?")) for d in pinned
+    }
+    merged = pinned + [
+        d for d in docs
+        if _norm_source(d.metadata.get("source", "?")) not in pinned_sources
+    ]
+    return merged[:limit]
 
 
 def expand_query(query: str, history: list[tuple[str, str]] | None) -> str:
@@ -309,12 +424,21 @@ def retrieve(query: str, k: int | None = None, types: list[str] | None = None) -
     """Similarity search; k from config when omitted, optional type scope.
 
     A narrow scope may legitimately return fewer than k documents (e.g. the
-    `table` type currently has 4 chunks).
+    `table` type currently has 4 chunks). Part-number tokens in the query
+    (``OYL-042``, ``WLP300``, ``3068``) additionally pin their exact matches
+    at the front of the result — embeddings cannot rank an opaque product
+    code against the sibling strains of the same lab.
     """
     cfg = load_config()
-    return _get_vectorstore().similarity_search(
-        query, k=k or cfg["top_k"], filter=type_filter(types)
+    limit = k or cfg["top_k"]
+    docs = _get_vectorstore().similarity_search(
+        query, k=limit, filter=type_filter(types)
     )
+    pinned = part_number_docs(query)
+    if pinned and types:
+        allowed = set(types)
+        pinned = [d for d in pinned if d.metadata.get("type") in allowed]
+    return merge_pinned(docs, pinned, limit)
 
 
 def _norm_source(source: str) -> str:
