@@ -45,6 +45,16 @@ from collectors.wyeast_collector import (  # noqa: E402
     strain_filename as wyeast_filename,
     write_documents as write_wyeast_documents,
 )
+import collectors.omega_collector as omega_collector
+from collectors.omega_collector import (
+    Strain as OmegaStrain,
+    OmegaCollector,
+    parse_product as parse_omega_product,
+    products_from_json,
+    render_strain as render_omega_strain,
+    strain_filename as omega_filename,
+    write_documents as write_omega_documents,
+)
 import collectors.brewingtools_collector as brewingtools_collector  # noqa: E402
 from collectors.brewingtools_collector import (  # noqa: E402
     BrewingToolsCollector,
@@ -808,6 +818,246 @@ def main() -> None:
                 wyeast_collector.fetch = original_wy_fetch
                 wyeast_collector.fetch_text = original_wy_fetch_text
             assert wy_kept.is_file(), f"{label}: fail-soft run wiped prior output"
+
+        # --- omega: synthetic products.json + product page, no network ---
+        omega_products_payload = _json.dumps(
+            {
+                "products": [
+                    {
+                        "handle": "west-coast-ale-ii-standard",
+                        "title": "West Coast II",
+                        "product_type": "Standard Brewing Yeast",
+                        "variants": [{"sku": "OYL-009"}],
+                    },
+                    {
+                        "handle": "lacto-standard",
+                        "title": "Lacto",
+                        "product_type": "Bacteria",
+                        "variants": [{"sku": "OYL-605"}],
+                    },
+                    {
+                        "handle": "no-sku",
+                        "title": "No SKU",
+                        "variants": [{"sku": ""}],
+                    },
+                ]
+            }
+        ).encode("utf-8")
+        omega_products = products_from_json(omega_products_payload)
+        assert [p["handle"] for p in omega_products] == [
+            "west-coast-ale-ii-standard",
+            "lacto-standard",
+            "no-sku",
+        ], omega_products
+        assert omega_products[0]["sku"] == "OYL-009", omega_products[0]
+        assert omega_products[2]["sku"] == "", omega_products[2]
+        assert products_from_json(b"<html>not json</html>") == []
+        assert products_from_json(b'{"products": "garbage"}') == []
+        assert products_from_json(b'{"products": [null, {"handle": ""}]}') == []
+
+        omega_html = """
+        <html><head>
+          <title>West Coast Ale II (OYL-009) | Omega</title>
+          <style>.leak { color: red; }</style>
+          <script>var secret = 1;</script>
+        </head><body>
+          <p>Yeast<span class="t-tag">/</span>
+            <span class="t-tag">OYL-009</span></p>
+          <h1 class="t-h2">West Coast II</h1>
+          <div class="w-full bg-white text-black p-6 space-y-6">
+            <div class="t-b2-bold"><p>A West Coast strain that's genetically
+              haze-positive. Dry hopping triggers stable haze.</p></div>
+            <dl class="grid grid-cols-8">
+              <div><dt class="t-caption">Tasting Notes</dt>
+                <dd class="col-span-full"><span class="pill">neutral</span>
+                </dd></div>
+              <div><dt>Strain Type</dt><dd>Ale</dd></div>
+              <div><dt>Flocculation</dt><dd>Medium</dd></div>
+              <div><dt>Attenuation</dt><dd>Medium: 76-82%</dd></div>
+              <div><dt>Temperature Range</dt><dd>64-72°F (18-22°C)</dd></div>
+              <div><dt>Alcohol Tolerance</dt><dd>12-14%</dd></div>
+              <div><dt>Hazy</dt><dd>Yes</dd></div>
+              <div><dt>Diastatic</dt><dd>No</dd></div>
+              <div><dt>Phenolic</dt><dd>No</dd></div>
+              <div><dt>Availability</dt><dd>Homebrew, Commercial</dd></div>
+            </dl>
+          </div>
+          <script>var trailing = 3;</script>
+        </body></html>
+        """
+        omega = parse_omega_product(
+            omega_html,
+            part="OYL-009",
+            source_url="https://omegayeast.com/products/west-coast-ale-ii-standard",
+        )
+        assert omega is not None
+        assert omega.name == "West Coast II", omega.name
+        assert omega.part == "OYL-009", omega.part
+        assert omega.strain_type == "Ale", omega.strain_type
+        assert omega.tasting_notes == "neutral", omega.tasting_notes
+        assert omega.availability == "Homebrew, Commercial", omega.availability
+        assert omega.specs["FLOCCULATION"] == "Medium", omega.specs
+        assert omega.specs["ATTENUATION"] == "Medium: 76-82%", omega.specs
+        assert (
+            omega.specs["TEMPERATURE RANGE"] == "18–22 °C (64–72 °F)"
+        ), omega.specs["TEMPERATURE RANGE"]
+        assert omega.specs["ALCOHOL TOLERANCE"] == "12-14%", omega.specs
+        assert "haze-positive" in omega.description, omega.description
+        assert "secret" not in omega.description, omega.description
+        assert "trailing" not in omega.description, omega.description
+        assert "<" not in omega.description, omega.description
+        assert omega.source_url.endswith("west-coast-ale-ii-standard")
+
+        # part number falls back to the breadcrumb tag when JSON has no SKU
+        no_sku = parse_omega_product(omega_html)
+        assert no_sku is not None and no_sku.part == "OYL-009", no_sku.part
+
+        # pill lists: multi-word tasting notes joined with ", "
+        pills = parse_omega_product(
+            "<h1>Funky</h1>"
+            "<dl><dt>Tasting Notes</dt>"
+            "<dd><span>spicy</span><span>funky</span><span>tart dry</span></dd>"
+            "</dl>"
+        )
+        assert pills is not None
+        assert pills.tasting_notes == "spicy, funky, tart dry", pills.tasting_notes
+
+        # pages that are not renderable strains
+        assert parse_omega_product("<html><body><p>nothing here</p></body></html>") is None
+        assert parse_omega_product("<h1>No specs</h1><p>marketing only</p>") is None
+
+        omega_doc = render_omega_strain(omega)
+        assert omega_doc.startswith("# OYL-009 West Coast II (Omega Yeast)"), omega_doc[:60]
+        assert "**Type:** Ingredient (Yeast)" in omega_doc
+        assert "**Lab:** Omega Yeast" in omega_doc
+        assert "**Product:** OYL-009" in omega_doc
+        assert "**Availability:** Homebrew, Commercial" in omega_doc
+        for bullet in (
+            "- Flocculation: Medium",
+            "- Attenuation: Medium: 76-82%",
+            "- Recommended temperature: 18–22 °C (64–72 °F)",
+            "- Alcohol tolerance: 12-14%",
+            "- Tasting notes: neutral",
+            "- Strain type: Ale",
+            "- Hazy: Yes",
+            "- Diastatic: No",
+            "- Phenolic: No",
+        ):
+            assert bullet in omega_doc, f"missing bullet {bullet!r}"
+        assert "## Profile" in omega_doc and "haze-positive" in omega_doc
+        assert "<" not in omega_doc, f"raw HTML leaked: {omega_doc!r}"
+        assert omega_doc.endswith("\n") and not omega_doc.endswith("\n\n")
+        assert all(line == line.rstrip() for line in omega_doc.splitlines()), "trailing whitespace"
+        assert len(omega_doc) <= 1900, f"doc exceeds the one-chunk budget: {len(omega_doc)}"
+
+        # bacteria strain: Strain Type=Bacteria -> bacteria-culture Type line
+        lacto = parse_omega_product(
+            """
+            <h1 class="t-h2">Lacto</h1>
+            <div class="t-b2-bold"><p>A Lactobacillus blend that sours
+              efficiently within 24 to 72 hours.</p></div>
+            <dl>
+              <div><dt>Tasting Notes</dt><dd><span>fruity</span>
+                <span>tart</span></dd></div>
+              <div><dt>Strain Type</dt><dd>Bacteria</dd></div>
+              <div><dt>Temperature Range</dt><dd>68-95°F (20-35°C)</dd></div>
+              <div><dt>Availability</dt><dd>Homebrew, Commercial</dd></div>
+            </dl>
+            """,
+            part="OYL-605",
+        )
+        assert lacto is not None
+        assert lacto.tasting_notes == "fruity, tart", lacto.tasting_notes
+        assert lacto.specs["TEMPERATURE RANGE"] == "20–35 °C (68–95 °F)"
+        lacto_doc = render_omega_strain(lacto)
+        assert "# OYL-605 Lacto (Omega Yeast)" in lacto_doc, lacto_doc
+        assert "**Type:** Ingredient (Bacteria culture)" in lacto_doc, lacto_doc
+        for absent_bullet in ("- Flocculation:", "- Attenuation:", "- Alcohol tolerance:"):
+            assert absent_bullet not in lacto_doc, f"{absent_bullet!r} must be absent"
+
+        # Availability is the meta line, not a Key Specs bullet
+        assert "- Availability:" not in omega_doc, omega_doc
+
+        # filenames: yeast- prefix is the ingest contract; ASCII slugs
+        assert (
+            omega_filename(omega) == "yeast-oyl-009-west-coast-ii.md"
+        ), omega_filename(omega)
+        assert omega_filename(lacto) == "yeast-oyl-605-lacto.md", omega_filename(lacto)
+        assert (
+            omega_filename(OmegaStrain(name="Bayern Lager"))
+            == "yeast-bayern-lager.md"
+        ), omega_filename(OmegaStrain(name="Bayern Lager"))
+
+        # write_documents: clears its own subtree, writes only ingredients/
+        om_dest = tmp / "omega_write"
+        (om_dest / "ingredients").mkdir(parents=True, exist_ok=True)
+        om_stale = om_dest / "ingredients" / "yeast-stale.md"
+        om_stale.write_text("old", encoding="utf-8")
+        om_written = write_omega_documents({"yeast-x.md": "# X\n"}, om_dest)
+        assert len(om_written) == 1 and om_written[0].is_file()
+        assert not om_stale.exists(), "stale file survived re-run"
+        assert om_written[0].parent == om_dest / "ingredients", om_written[0]
+        assert [p.name for p in om_dest.iterdir()] == ["ingredients"]
+
+        # collector success path: JSON listing -> pages, no-SKU page 404s
+        omega_live_dest = tmp / "omega_live"
+        omega_pages = {
+            "https://omegayeast.com/products/west-coast-ale-ii-standard": omega_html,
+            "https://omegayeast.com/products/lacto-standard": (
+                "<h1>Lacto</h1><dl><dt>Strain Type</dt><dd>Bacteria</dd></dl>"
+            ),
+        }
+
+        def _omega_page_fetch(url, **kwargs):
+            try:
+                return omega_pages[url]
+            except KeyError:
+                raise SourceUnavailableError(f"{url} returned HTTP 404") from None
+
+        original_om_fetch = omega_collector.fetch
+        original_om_fetch_text = omega_collector.fetch_text
+        omega_collector.fetch = lambda url, **kwargs: omega_products_payload
+        omega_collector.fetch_text = _omega_page_fetch
+        try:
+            omega_written = OmegaCollector().collect(omega_live_dest)
+        finally:
+            omega_collector.fetch = original_om_fetch
+            omega_collector.fetch_text = original_om_fetch_text
+        assert len(omega_written) == 2, omega_written
+        assert (
+            omega_live_dest / "ingredients" / "yeast-oyl-009-west-coast-ii.md"
+        ).is_file()
+        assert (omega_live_dest / "ingredients" / "yeast-oyl-605-lacto.md").is_file()
+
+        # fail soft: listing down / garbage listing / every page failing
+        om_soft_dest = tmp / "omega_soft"
+        om_kept = om_soft_dest / "ingredients" / "yeast-keep.md"
+        om_kept.parent.mkdir(parents=True, exist_ok=True)
+        om_kept.write_text("# keep\n", encoding="utf-8")
+
+        def _offline_om(url, **kwargs):
+            raise SourceUnavailableError(f"offline: {url}")
+
+        for label, listing_fetch, page_fetch in (
+            ("listing down", _offline_om, original_om_fetch_text),
+            ("garbage listing", lambda url, **kw: b"<html>not json</html>", original_om_fetch_text),
+            ("all pages failing", lambda url, **kw: omega_products_payload, _offline_om),
+        ):
+            omega_collector.fetch = listing_fetch
+            omega_collector.fetch_text = page_fetch
+            try:
+                try:
+                    OmegaCollector().collect(om_soft_dest)
+                except SourceUnavailableError:
+                    pass
+                else:
+                    raise AssertionError(
+                        f"{label}: unreachable source must raise SourceUnavailableError"
+                    )
+            finally:
+                omega_collector.fetch = original_om_fetch
+                omega_collector.fetch_text = original_om_fetch_text
+            assert om_kept.is_file(), f"{label}: fail-soft run wiped prior output"
 
         # --- brewingtools: synthetic hops.json payload, no network ---
         full_record = {
@@ -1744,6 +1994,9 @@ def main() -> None:
         print("      whitelabs strain parsing/rendering (specs, styles, fail-soft),")
         print("      wyeast sitemap/culture parsing (multi-tab dedupe, bacteria,")
         print("      -PC availability, filename/one-chunk contract, fail-soft),")
+        print("      omega collection JSON/product page parsing (spec dl pairs,")
+        print("      pill lists, bacteria type, breadcrumb SKU fallback,")
+        print("      filename/one-chunk contract, idempotent write, fail-soft),")
         print("      brewingtools hop dataset (range quirks, id->name resolution,")
         print("      one-chunk rendering, hop- filenames, fail-soft),")
         print("      brewingtools malt dataset (colour L/EBC as published, extract/")
