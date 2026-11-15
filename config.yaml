@@ -29,6 +29,7 @@ collectors:                           # enabled data collectors (python -m colle
   - whitelabs
   - wyeast
   - omega
+  - fermentis
   - brewingtools
   - hop_substitutions
 chroma_dir: chroma_db

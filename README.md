@@ -117,7 +117,7 @@ root; absolute paths (e.g. a UNC share) are used as-is.
 | `data_dir` | `data` | Legacy single directory; ingest uses `data_dirs` |
 | `data_dirs` | `[data, collected_data]` | Directories ingest reads from; missing ones are skipped with a warning |
 | `collect_dest` | `collected_data` | Where collectors write (`<collect_dest>/<collector_id>/`) |
-| `collectors` | `[diydog, bjcp, whitelabs, wyeast, brewingtools]` | Collectors run by `python -m collectors` |
+| `collectors` | `[diydog, bjcp, ba, whitelabs, wyeast, omega, fermentis, brewingtools, hop_substitutions]` | Collectors run by `python -m collectors` |
 | `chroma_dir` | `chroma_db` | Persisted vector store (gitignored) |
 | `embedding_model` | `all-MiniLM-L6-v2` | sentence-transformers embedding model |
 

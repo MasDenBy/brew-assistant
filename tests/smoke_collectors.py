@@ -55,6 +55,17 @@ from collectors.omega_collector import (
     strain_filename as omega_filename,
     write_documents as write_omega_documents,
 )
+import collectors.fermentis_collector as fermentis_collector
+from collectors.fermentis_collector import (
+    DIRECT_PITCHING_LINE,
+    FermentisCollector,
+    Yeast as FermentisYeast,
+    parse_item as parse_fermentis_item,
+    products_from_payload,
+    render_yeast as render_fermentis_yeast,
+    yeast_filename as fermentis_filename,
+    write_documents as write_fermentis_documents,
+)
 import collectors.brewingtools_collector as brewingtools_collector  # noqa: E402
 from collectors.brewingtools_collector import (  # noqa: E402
     BrewingToolsCollector,
@@ -1059,6 +1070,283 @@ def main() -> None:
                 omega_collector.fetch_text = original_om_fetch_text
             assert om_kept.is_file(), f"{label}: fail-soft run wiped prior output"
 
+        # --- fermentis: synthetic WP REST payload, no network ---
+        # modeled on the real pages: a "standard" product (tagline, overview
+        # stats with <br/> labels + dash POF value, technical tabs with the
+        # Lesaffre boilerplate) and a "special" product (no overview, sensory
+        # section, o-bulleted instructions, 24-month shelf life), plus a
+        # non-yeast item that must be filtered out by slug.
+        def _fermentis_item(slug, title, content):
+            return {
+                "slug": slug,
+                "title": {"rendered": title},
+                "link": f"https://fermentis.com/en/product/{slug}/",
+                "content": {"rendered": content},
+            }
+
+        _fm_overview = """
+          <div class="container section-title-container"><h2 class="section-title">
+          <span class="section-title-main">The strong &amp; robust lager yeast</span></h2></div>
+          <p>This famous strain from Weihenstephan gives clean flavors.</p>
+          <p><strong>Ingredients: </strong>Yeast (<em>Saccharomyces pastorianus</em>), emulsifier E491</p>
+          <style>#leak { color: red; }</style>
+          <div class="container section-title-container"><h3 class="section-title">
+          <span class="section-title-main">SafLager&trade; W-34/70 overview</span></h3></div>
+          <div class="col"><p><strong>Total<br />esters</strong></p>
+            <div class="banner"><div class="text-box-content"><p><span>Low</span></p></div></div></div>
+          <div class="col"><p><strong>Total sup.alcohols</strong></p>
+            <div class="banner"><div class="text-box-content"><p><span>Low</span></p></div></div></div>
+          <div class="col"><p><strong>Apparent attenuation</strong></p>
+            <div class="banner"><div class="text-box-content"><p><span>80-84%</span></p></div></div></div>
+          <div class="col"><p><strong>Sedimentation time</strong></p>
+            <div class="banner"><div class="text-box-content"><p><span>Fast</span></p></div></div></div>
+          <div class="col"><p><strong>Alcohol tolerance</strong></p>
+            <div class="banner"><div class="text-box-content"><p><span>9-11%</span></p></div></div></div>
+          <div class="col"><p><strong>Phenolic Off-Flavor</strong></p>
+            <div class="banner"><div class="text-box-content"><p><span>&#8211;</span></p></div></div></div>
+          <div class="container section-title-container"><h3 class="section-title">
+          <span class="section-title-main">SafLager&trade; W-34/70 technical features</span></h3></div>
+          <div class="tabbed-content"><div class="tab-panels">
+            <div id="tab_dosage-&amp;-usage" class="panel active entry-content">
+              <h4>Dosage / Temperature</h4>
+              <p><strong>80 to 120 g/hl at ideally 12&deg;C &ndash; 18&deg;C (53.6-64.4&deg;F).</strong></p>
+              <h5>Use</h5>
+              <p>Lesaffre know-how and continuous yeast production process improvement
+              generates an exceptional quality of dry yeasts.</p>
+              <p><strong>① Direct pitching:</strong></p>
+              <p>Pitch the yeast directly in the fermentation vessel on the surface of
+              the wort at or above the fermentation temperature. Progressively sprinkle
+              the dry yeast into the wort ensuring the yeast covers all the surface
+              of wort available to avoid clumps.</p>
+              <p><strong>② With prior rehydration:</strong></p>
+              <p>Alternatively, sprinkle the yeast in minimum 10 times its weight of
+              sterile water or boiled and hopped wort at 15 to 25°C (59°F to 77°F).
+              Leave to rest 15 to 30 minutes, gently stir and pitch the resultant
+              cream into the fermentation vessel.</p>
+            </div>
+            <div id="tab_typical-analysis" class="panel entry-content"><ul>
+              <li>Viable yeast &gt; 6.0 *10<sup>9</sup> cfu/g</li>
+              <li>Purity : &gt; 99.9 %<ul>
+                <li>Lactic acid bacteria: &lt; 1 cfu /6.0*10<sup>6</sup> yeast cell</li>
+                <li>Pathogenic micro-organisms: in accordance with regulation</li>
+              </ul></li>
+            </ul><p><em>*EBC Analytica 4.2.6</em></p></div>
+            <div id="tab_storage-&amp;-shelf-life" class="panel entry-content">
+              <h4>Storage</h4>
+              <p>For less than 6 months: the product must be stored below 24°C. For
+              more than 6 months: the product must be stored below 15°C.</p>
+              <h4>Shelf life</h4>
+              <p>36 months from production date. Refer to best before end date
+              printed on the sachet.</p>
+              <p><em>Each Fermentis yeast is developed under a specific production
+              scheme and benefits from the know-how of the Lesaffre group.</em></p>
+            </div>
+          </div></div>
+          <p><em>Fermentis dry brewing yeasts are well known for their ability to
+          produce a large variety of beer styles.</em></p>
+          <div class="container section-title-container"><h3 class="section-title">
+          <span class="section-title-main">Related content</span></h3></div>
+          <a href="https://fermentis.com/en/news/x/">a blog link that must not leak</a>
+        """
+        _fm_special = """
+          <div class="container section-title-container"><h2 class="section-title">
+          <span class="section-title-main">The First Dry Brett for Funkier Beers</span></h2></div>
+          <p>SafBrew&trade; BR-8 is the first Brettanomyces bruxellensis yeast
+          available to brewers in a dry microgranular format.</p>
+          <p>It offers all the flavor benefits of wild Brett yeast, but with more
+          control and reliability.</p>
+          <div class="container section-title-container"><h3 class="section-title">
+          <span class="section-title-main">SafBrew&trade; BR-8 sensory profile</span></h3></div>
+          <p>SafBrew&trade; BR-8 produces phenolic compounds that create a
+          distinctive finishing touch with funkier notes.</p>
+          <div class="container section-title-container"><h3 class="section-title">
+          <span class="section-title-main">SafBrew&trade; BR-8 technical features</span></h3></div>
+          <div class="tabbed-content"><div class="tab-panels">
+            <div id="tab_dosage-&amp;-usage" class="panel entry-content">
+              <h4>Dosage/Temperature</h4>
+              <p>Optimal fermentation temperature 15&deg;C &ndash; 25&deg;C (59&deg;F &ndash; 77&deg;F).</p>
+              <h3>Instructions of use:</h3>
+              <p>Rehydratation: SafBrew&trade; BR-8 should not be rehydrated directly
+              in the beer.</p>
+              <p>Sprinkle the yeast in minimum 10 times its weight of sterile water
+              at a temperature of 25&deg;C to 29&deg;C (77&deg;F to 84.2&deg;F).
+              Leave to rest 15 to 30 minutes.</p>
+            </div>
+            <div id="tab_typical-analysis" class="panel entry-content"><ul>
+              <li style="list-style-type: none;"><ul>
+                <li>Viable yeast &gt; 5.0 *10<sup>9</sup> cfu/g</li>
+                <li>Purity :</li>
+              </ul></li>
+            </ul></div>
+            <div id="tab_storage-&amp;-shelf-life" class="panel entry-content">
+              <h4>Storage</h4><p>The product must be stored/transported in dry
+              conditions and protected from direct heat sources.</p>
+              <h4>Shelf life</h4><p>24 months from production date.</p>
+            </div>
+          </div></div>
+        """
+        fermentis_payload = _json.dumps(
+            [
+                _fermentis_item("saflager-w-34-70", "SafLager&trade; W-34/70", _fm_overview),
+                _fermentis_item("safbrew-br%e2%80%918", "SafBrew&trade; BR-8", _fm_special),
+                _fermentis_item("bacteria-xyz", "Bacteria XYZ", "<p>not a yeast</p>"),
+                _fermentis_item("garbage", "", ""),
+            ]
+        ).encode("utf-8")
+
+        fermentis_items = products_from_payload(fermentis_payload)
+        assert [item["slug"] for item in fermentis_items] == [
+            "saflager-w-34-70",
+            "safbrew-br%e2%80%918",
+        ], fermentis_items
+        assert products_from_payload(b"<html>not json</html>") == []
+        assert products_from_payload(b'{"not": "a list"}') == []
+        assert products_from_payload(b'[{"slug": "other-lab-x"}]') == []
+
+        w3470 = parse_fermentis_item(fermentis_items[0])
+        assert w3470 is not None
+        assert w3470.name == "SafLager W-34/70", w3470.name
+        assert w3470.brand == "SafLager" and w3470.part == "W-34/70", (w3470.brand, w3470.part)
+        assert w3470.tagline == "The strong & robust lager yeast", w3470.tagline
+        assert w3470.ingredients.startswith("Yeast (Saccharomyces pastorianus)"), w3470.ingredients
+        assert w3470.specs["APPARENTATTENUATION"] == "80-84%", w3470.specs
+        assert w3470.specs["TOTALSUPALCOHOLS"] == "Low", w3470.specs
+        assert w3470.specs["PHENOLICOFFFLAVOR"] == "-", w3470.specs
+        assert w3470.dosage.startswith("80 to 120 g/hl"), w3470.dosage
+        assert w3470.direct_pitching is True, w3470.direct_pitching
+        assert "15 to 25°C" in w3470.usage, w3470.usage
+        assert "Lesaffre know-how" not in w3470.usage, w3470.usage
+        assert "Progressively sprinkle" not in w3470.usage, w3470.usage
+        assert w3470.viability == "> 6.0 *10^9 cfu/g", w3470.viability
+        assert w3470.purity == "> 99.9 %", w3470.purity
+        assert w3470.storage.startswith("Below 24 °C"), w3470.storage
+        assert w3470.shelf_life == "Shelf life: 36 months.", w3470.shelf_life
+
+        # the special product: no overview, o-free instructions, 24 months
+        br8 = parse_fermentis_item(fermentis_items[1])
+        assert br8 is not None
+        assert br8.name == "SafBrew BR-8" and br8.part == "BR-8", (br8.name, br8.part)
+        assert br8.specs == {}, br8.specs
+        assert br8.sensory.startswith("SafBrew BR-8 produces phenolic"), br8.sensory
+        assert br8.direct_pitching is False, br8.direct_pitching
+        assert br8.usage.startswith("Rehydratation:"), br8.usage
+        assert "25°C to 29°C" in br8.usage, br8.usage
+        assert br8.viability == "> 5.0 *10^9 cfu/g", br8.viability
+        assert br8.purity == "", br8.purity
+        assert br8.shelf_life == "Shelf life: 24 months.", br8.shelf_life
+
+        # not renderable items
+        assert parse_fermentis_item({"title": "", "content": "<p>x</p>"}) is None
+        assert parse_fermentis_item({"title": "SafAle X", "content": "   "}) is None
+        # sensory section that repeats the description verbatim is dropped
+        repeated = parse_fermentis_item(
+            _fermentis_item(
+                "safale-x",
+                "SafAle X",
+                "<span class=\"section-title-main\">tagline</span>"
+                "<p>A neutral ale yeast.</p>"
+                "<span class=\"section-title-main\">SafAle X sensory profile</span>"
+                "<p>A neutral ale yeast.</p>"
+                "<span class=\"section-title-main\">SafAle X technical features</span>"
+                "<div class=\"tab-panels\"><div id=\"tab_dosage-&amp;-usage\" class=\"panel\">"
+                "<p>50 to 80 g/hl at 18°C.</p></div></div>",
+            )
+        )
+        assert repeated is not None and repeated.sensory == "", repeated.sensory
+
+        w3470_doc = render_fermentis_yeast(w3470)
+        assert w3470_doc.startswith("# SafLager W-34/70 (Fermentis)"), w3470_doc[:40]
+        assert "**Type:** Ingredient (Yeast)" in w3470_doc
+        assert "**Lab:** Fermentis (Lesaffre)" in w3470_doc
+        assert "**Product:** W-34/70" in w3470_doc
+        assert "**Ingredients:** Yeast (Saccharomyces pastorianus)" in w3470_doc
+        for bullet in (
+            "- Apparent attenuation: 80-84%",
+            "- Alcohol tolerance: 9-11%",
+            "- Sedimentation: Fast",
+            "- Total esters: Low",
+            "- Total sup. alcohols: Low",
+            "- Phenolic off-flavor (POF): -",
+            "- Viability: > 6.0 *10^9 cfu/g",
+            "- Purity: > 99.9 %",
+        ):
+            assert bullet in w3470_doc, f"missing bullet {bullet!r}"
+        assert "## Dosage & Usage" in w3470_doc
+        assert DIRECT_PITCHING_LINE in w3470_doc, w3470_doc
+        assert "Lesaffre know-how" not in w3470_doc, w3470_doc
+        assert "## Profile" in w3470_doc and "Weihenstephan" in w3470_doc
+        assert "## Storage" in w3470_doc and "Shelf life: 36 months." in w3470_doc
+        assert "a blog link that must not leak" not in w3470_doc, w3470_doc
+        assert "<" not in w3470_doc, f"raw HTML leaked: {w3470_doc!r}"
+        assert w3470_doc.endswith("\n") and not w3470_doc.endswith("\n\n")
+        assert all(line == line.rstrip() for line in w3470_doc.splitlines()), "trailing whitespace"
+        assert len(w3470_doc) <= 1900, f"doc exceeds the one-chunk budget: {len(w3470_doc)}"
+
+        assert (
+            fermentis_filename(w3470) == "yeast-fermentis-saflager-w-34-70.md"
+        ), fermentis_filename(w3470)
+        assert fermentis_filename(br8) == "yeast-fermentis-safbrew-br-8.md", fermentis_filename(br8)
+        assert (
+            fermentis_filename(FermentisYeast(name="SafBrew É-9"))
+            == "yeast-fermentis-safbrew-e-9.md"
+        ), fermentis_filename(FermentisYeast(name="SafBrew É-9"))
+
+        fm_dest = tmp / "fermentis_write"
+        assert not fm_dest.exists()
+        fm_written = write_fermentis_documents({"yeast-x.md": "# X\n"}, fm_dest)
+        assert [path.name for path in fm_written] == ["yeast-x.md"], fm_written
+        assert (fm_dest / "ingredients" / "yeast-x.md").is_file()
+        write_fermentis_documents({"yeast-y.md": "# Y\n"}, fm_dest)   # idempotent
+        assert not (fm_dest / "ingredients" / "yeast-x.md").is_file()
+
+        # live collect with a monkeypatched fetch: non-yeast items filtered out
+        fermentis_live_dest = tmp / "fermentis_live"
+
+        def _fm_fetch(url, **kwargs):
+            return fermentis_payload
+
+        original_fm_fetch = fermentis_collector.fetch
+        fermentis_collector.fetch = _fm_fetch
+        try:
+            fm_written = FermentisCollector().collect(fermentis_live_dest)
+        finally:
+            fermentis_collector.fetch = original_fm_fetch
+        assert len(fm_written) == 2, fm_written
+        assert (
+            fermentis_live_dest / "ingredients" / "yeast-fermentis-saflager-w-34-70.md"
+        ).is_file()
+        assert (
+            fermentis_live_dest / "ingredients" / "yeast-fermentis-safbrew-br-8.md"
+        ).is_file()
+
+        # fail soft: API down / garbage payload -> SKIP, prior output preserved
+        fm_soft_dest = tmp / "fermentis_soft"
+        fm_kept = fm_soft_dest / "ingredients" / "yeast-keep.md"
+        fm_kept.parent.mkdir(parents=True, exist_ok=True)
+        fm_kept.write_text("# keep\n", encoding="utf-8")
+
+        def _offline_fm(url, **kwargs):
+            raise SourceUnavailableError(f"offline: {url}")
+
+        for label, fetch_fn in (
+            ("API down", _offline_fm),
+            ("garbage payload", lambda url, **kw: b"<html>not json</html>"),
+            ("payload without yeasts", lambda url, **kw: b'[{"slug": "bacteria-x"}]'),
+        ):
+            fermentis_collector.fetch = fetch_fn
+            try:
+                try:
+                    FermentisCollector().collect(fm_soft_dest)
+                except SourceUnavailableError:
+                    pass
+                else:
+                    raise AssertionError(
+                        f"{label}: unreachable source must raise SourceUnavailableError"
+                    )
+            finally:
+                fermentis_collector.fetch = original_fm_fetch
+            assert fm_kept.is_file(), f"{label}: fail-soft run wiped prior output"
+
         # --- brewingtools: synthetic hops.json payload, no network ---
         full_record = {
             "id": "citra-hbc-394",
@@ -1997,6 +2285,11 @@ def main() -> None:
         print("      omega collection JSON/product page parsing (spec dl pairs,")
         print("      pill lists, bacteria type, breadcrumb SKU fallback,")
         print("      filename/one-chunk contract, idempotent write, fail-soft),")
+        print("      fermentis WP REST products (slug filter, overview banner")
+        print("      pairs with <br/> labels and dash POF values, technical tab")
+        print("      panels, Lesaffre boilerplate compression, o-bullet joins,")
+        print("      nested analysis lis, sensory dedupe, filename/one-chunk")
+        print("      contract, idempotent write, fail-soft),")
         print("      brewingtools hop dataset (range quirks, id->name resolution,")
         print("      one-chunk rendering, hop- filenames, fail-soft),")
         print("      brewingtools malt dataset (colour L/EBC as published, extract/")
