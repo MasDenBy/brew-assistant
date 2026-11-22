@@ -39,6 +39,16 @@ def model_settings(cfg: dict, name: str) -> dict:
     `cfg["models"]` maps a model name to experimental overrides for the keys it
     carries (`temperature`, `num_ctx`, …); every other global key falls through.
     Unknown model names get the global settings unchanged.
+
+    `reasoning` defaults to False (thinking models must not spend the answer's
+    context budget on hidden reasoning — their thinking tokens stream as empty
+    chunks and can leave the visible answer empty). Set `reasoning: true`
+    globally or per model to let a thinking model think.
     """
     overrides = (cfg.get("models") or {}).get(name) or {}
-    return {key: overrides.get(key, cfg[key]) for key in ("temperature", "num_ctx")}
+    defaults = {
+        "temperature": overrides.get("temperature", cfg["temperature"]),
+        "num_ctx": overrides.get("num_ctx", cfg["num_ctx"]),
+        "reasoning": overrides.get("reasoning", cfg.get("reasoning", False)),
+    }
+    return defaults

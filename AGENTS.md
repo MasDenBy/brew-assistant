@@ -135,6 +135,104 @@ Implementation notes:
 
 ---
 
+### 6.2 Two-tier answer policy (decided 2026-11-22)
+
+The assistant is a colleague, not a search box. The old prompt-only rule
+"answer ONLY from context" made it refuse opinion/synthesis questions
+("which hops for a hoppy saison?") and hide the *why* behind grounded
+answers (S-04 "starter" → bare rehydration steps, with no explanation that
+dry yeast needs no starter).
+
+- `SYSTEM_PROMPT` (rag.py) defines two modes:
+  - FACTUAL (numbers, product specs, style stats, substitution tables,
+    recipe contents): RAG-only, verbatim quoting, canonical refusal
+    ("I don't have that information.") when the docs lack the answer.
+  - ADVICE (opinions, comparisons, "which X should I use", troubleshooting,
+    "how do I"): model knowledge + context grounding, real recommendation
+    required; general knowledge carries no citation and is never presented
+    as a document fact; document/general-knowledge contradictions resolve
+    in favor of the documents.
+- NUMBER SAFETY is global (both modes): no summing/averaging/scaling or
+  computing IBU/ABV/SRM; no invented numbers as document facts; off-topic
+  (non-brewing) questions still refuse with the canonical phrase, and the
+  UI still hides sources for refusals (`is_refusal` unchanged).
+- Deliberately rejected — local-first stays a HARD constraint
+  (reconfirmed 2026-11-22): web search, and an OpenAI sub-agent escalation
+  for "unsure" cases. Local Q/A logging for a future eval/fine-tuning
+  dataset: proposed, deferred (separate task).
+- Eval: two regression rows appended to tests/eval_questions.csv (hoppy
+  saison advice, S-04 starter) — need a live eval re-run. Refusal rows
+  must keep refusing: Maris Otter substitution (row 10), chocolate malt
+  (12), IBU calculation (13), Dead Pony Club mash pH (24).
+- tests/test_refusal.py unchanged (phrase + detector untouched).
+
+Follow-up fixes, same day (2026-11-22) — "how many packs of S-04 for 19 L
+at OG 20 °P" still refused with the two-tier prompt in place. Three stacked
+causes, all fixed:
+
+1. Retrieval pin gap: `_PART_TOKEN_RE` required 2+ letters before the code,
+   so Fermentis single-letter codes (S-04, T-58, K-97, E-30, W-34/70) never
+   pinned — even with "S-04" in the query the doc fell out of top-8
+   (verified: top-8 was all White Labs/Wyeast/recipes). Regex now allows
+   1+ letters; tests/test_part_number_retrieval.py covers S-04/T-58/K-97.
+2. Collector gap: Fermentis pages state pack sizes ("Available in 11,5g –
+   100g – 500g and 10kg packaging.") but the collector dropped the line.
+   New `packaging` field → rendered as a "Packaging:" Key Specs bullet.
+   Requires re-collect (python -m collectors) + re-ingest.
+3. Prompt gap: NUMBER SAFETY forbade the dosage arithmetic. New exception:
+   one rate stated verbatim in the context × the user's own batch volume,
+   with the arithmetic shown (19 L = 0.19 hl; 50-80 g/hl × 0.19 hl =
+   9.5-15.2 g), rounded to a practical amount. IBU/ABV/SRM formulas stay
+   forbidden. Eval row added (naming S-04 — a history-free "this yeast"
+   cannot be resolved and should ask a clarifying question).
+
+---
+
+### 6.3 Dialogue history (decided 2026-11-22)
+
+Normal use is a dialogue: discuss a style, then ask "Which yeasts might be
+good for this style?". Two layers make that work:
+
+- Generation: the LLM sees recent turns (max_history_turns + token budget,
+  app.py passes full history; caption shows "history: N of M turns").
+- Retrieval: `expand_query` re-injects the last MAX_QUERY_TURNS (3) USER
+  turns into the retrieval query, so deep anaphora resolves ("this style"
+  named 2+ turns back, with anaphoric turns in between). Assistant turns
+  are excluded on purpose: their wording biases retrieval toward what was
+  already shown. Part-number pinning fires on codes from any injected turn.
+- Short selector follow-ups (<30 chars, "The BJCP one.") retrieve by the
+  last user turn alone (replaced, not appended).
+- Tests: tests/test_expand_query.py (offline). Verified live: 3-turn
+  saison dialogue retrieves 8/8 saison yeasts on every turn.
+
+---
+
+### 6.4 Thinking models & style pinning (2026-11-22)
+
+gemma4:12b produced "silent" answers — nothing (not even the refusal
+phrase) next to a populated sources panel. Two causes, both fixed:
+
+- Thinking models: Ollama streams hidden `thinking` tokens separately;
+  langchain-ollama surfaces them as EMPTY chunks, and reasoning can spend
+  the entire remaining context window, leaving zero visible tokens.
+  `get_llm` now passes `reasoning=model_settings(...)` — global
+  `reasoning: false` in config.yaml (per-model override possible).
+  Verified: 1117 empty chunks -> 2 with reasoning disabled.
+- Never render silence: `ask()`/`stream_answer()` fall back to the
+  canonical refusal phrase when the model's answer is empty/whitespace, so
+  the UI hides sources and shows a sane reply instead of nothing.
+- Style docs crowded out of retrieval: "Tell me about English IPA."
+  retrieved 8/8 recipes (their "Style: English IPA" lines match the
+  question better than the guideline doc). `style_title_docs()` pins style
+  docs whose TITLE covers every content token of the query (same rule as
+  the disambiguation matcher, over the whole store, capped
+  MAX_STYLE_PINS=4). Part-number pins keep priority; both respect a type
+  scope filter. Disambiguation now fires deterministically for multi-
+  guideline matches (closes the AGENTS.md 6.1 follow-up "per-guideline
+  coverage for style queries"). Tests: tests/test_style_pins.py.
+
+---
+
 ## 7. Recommended Immediate Next Steps
 
 1. Install Ollama and pull a 7B model (e.g., `llama3.1:8b` or `qwen2.5:7b`) to verify it runs on the RTX 3060.

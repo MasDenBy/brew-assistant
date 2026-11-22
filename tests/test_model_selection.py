@@ -25,14 +25,25 @@ GLOBAL = {"model": "m0", "temperature": 0.3, "num_ctx": 8192}
 
 
 def test_model_settings() -> None:
-    # per-model overrides win over globals
+    # per-model overrides win over globals; `reasoning` defaults to False
     cfg = GLOBAL | {"models": {"m1": {"num_ctx": 16384, "temperature": 0.2}}}
-    assert model_settings(cfg, "m1") == {"temperature": 0.2, "num_ctx": 16384}
-    globals_ok = {"temperature": 0.3, "num_ctx": 8192}
+    assert model_settings(cfg, "m1") == {
+        "temperature": 0.2, "num_ctx": 16384, "reasoning": False,
+    }
+    globals_ok = {"temperature": 0.3, "num_ctx": 8192, "reasoning": False}
 
     # partial override: only the overridden key changes
     cfg = GLOBAL | {"models": {"m1": {"num_ctx": 4096}}}
-    assert model_settings(cfg, "m1") == {"temperature": 0.3, "num_ctx": 4096}
+    assert model_settings(cfg, "m1") == {
+        "temperature": 0.3, "num_ctx": 4096, "reasoning": False,
+    }
+
+    # reasoning enabled globally, or per model
+    cfg = GLOBAL | {"reasoning": True, "models": {"m1": {"reasoning": False}}}
+    assert model_settings(cfg, "m1")["reasoning"] is False
+    assert model_settings(cfg, "m0")["reasoning"] is True
+    cfg = GLOBAL | {"models": {"m1": {"reasoning": True}}}
+    assert model_settings(cfg, "m1")["reasoning"] is True
 
     # unknown model, empty and absent `models:` -> globals unchanged
     cfg = GLOBAL | {"models": {"m1": {"num_ctx": 4096}}}

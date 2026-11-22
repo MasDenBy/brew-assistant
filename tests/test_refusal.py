@@ -1,7 +1,8 @@
 """Offline checks for no-answer refusal detection (rag.is_refusal).
 
 The UI must hide the retrieved sources whenever the model declines to answer
-(the chunks did not contain the answer), so the detector must:
+(off-topic question, or a factual answer absent from the documents), so the
+detector must:
 - accept the canonical phrase in all the shapes the model produces
   (case, trailing punctuation, typographic apostrophe, markdown prefixes,
   trailing elaboration)

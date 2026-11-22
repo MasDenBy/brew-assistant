@@ -60,6 +60,7 @@ from collectors.fermentis_collector import (
     DIRECT_PITCHING_LINE,
     FermentisCollector,
     Yeast as FermentisYeast,
+    packaging_from_page,
     parse_item as parse_fermentis_item,
     products_from_payload,
     render_yeast as render_fermentis_yeast,
@@ -1087,6 +1088,7 @@ def main() -> None:
         _fm_overview = """
           <div class="container section-title-container"><h2 class="section-title">
           <span class="section-title-main">The strong &amp; robust lager yeast</span></h2></div>
+          <p>Available in 11,5g &ndash; 100g &ndash; 500g and 10kg packaging.</p>
           <p>This famous strain from Weihenstephan gives clean flavors.</p>
           <p><strong>Ingredients: </strong>Yeast (<em>Saccharomyces pastorianus</em>), emulsifier E491</p>
           <style>#leak { color: red; }</style>
@@ -1221,6 +1223,7 @@ def main() -> None:
         assert w3470.purity == "> 99.9 %", w3470.purity
         assert w3470.storage.startswith("Below 24 °C"), w3470.storage
         assert w3470.shelf_life == "Shelf life: 36 months.", w3470.shelf_life
+        assert w3470.packaging == "11,5g – 100g – 500g and 10kg", w3470.packaging
 
         # the special product: no overview, o-free instructions, 24 months
         br8 = parse_fermentis_item(fermentis_items[1])
@@ -1234,6 +1237,7 @@ def main() -> None:
         assert br8.viability == "> 5.0 *10^9 cfu/g", br8.viability
         assert br8.purity == "", br8.purity
         assert br8.shelf_life == "Shelf life: 24 months.", br8.shelf_life
+        assert br8.packaging == "", br8.packaging
 
         # not renderable items
         assert parse_fermentis_item({"title": "", "content": "<p>x</p>"}) is None
@@ -1269,6 +1273,7 @@ def main() -> None:
             "- Phenolic off-flavor (POF): -",
             "- Viability: > 6.0 *10^9 cfu/g",
             "- Purity: > 99.9 %",
+            "- Packaging: 11,5g – 100g – 500g and 10kg",
         ):
             assert bullet in w3470_doc, f"missing bullet {bullet!r}"
         assert "## Dosage & Usage" in w3470_doc
@@ -1277,6 +1282,13 @@ def main() -> None:
         assert "## Profile" in w3470_doc and "Weihenstephan" in w3470_doc
         assert "## Storage" in w3470_doc and "Shelf life: 36 months." in w3470_doc
         assert "a blog link that must not leak" not in w3470_doc, w3470_doc
+        # packaging line extraction from a rendered product page (the REST
+        # payload never contains it; theme-rendered paragraph)
+        assert packaging_from_page(
+            '<p style="text-align: center"><em>Available in 11,5g - 100g '
+            "- 500g and 10kg packaging.</em></p>"
+        ) == "11,5g - 100g - 500g and 10kg"
+        assert packaging_from_page("<p>no packaging line here</p>") == ""
         assert "<" not in w3470_doc, f"raw HTML leaked: {w3470_doc!r}"
         assert w3470_doc.endswith("\n") and not w3470_doc.endswith("\n\n")
         assert all(line == line.rstrip() for line in w3470_doc.splitlines()), "trailing whitespace"

@@ -32,6 +32,12 @@ def test_tokens():
     assert _PART_TOKEN_RE.findall("Wyeast 2035-PC availability") == ["2035-PC"]
     assert _PART_TOKEN_RE.findall("us-05 at 18C") == ["us-05"]
     assert _PART_TOKEN_RE.findall("PIN-001Dry vs OYL-071Dry") == ["PIN-001Dry", "OYL-071Dry"]
+    # single-letter prefixes: Fermentis codes (2026-11-22 retrieval miss:
+    # "S-04" never pinned, the doc fell out of top-8, dosage questions refused)
+    assert _PART_TOKEN_RE.findall("How many packs of S-04 do I need?") == ["S-04"]
+    assert _PART_TOKEN_RE.findall("T-58 vs K-97 for a Belgian blonde") == ["T-58", "K-97"]
+    assert _PART_TOKEN_RE.findall("W-34-70 lag time") == ["W-34"]
+    assert _PART_TOKEN_RE.findall("SafAle S-04 or E-30?") == ["S-04", "E-30"]
     # no product code -> no pinning
     assert _PART_TOKEN_RE.findall("cascade substitute") == []
     assert _PART_TOKEN_RE.findall("Tell me about Belgian saison styles") == []

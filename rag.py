@@ -5,6 +5,7 @@ Model name/temperature/top_k come from config.yaml only — never hardcode them.
 from collections import Counter
 from functools import lru_cache
 import re
+import time
 
 from langchain_chroma import Chroma
 from langchain_core.documents import Document
@@ -144,24 +145,59 @@ SYSTEM_PROMPT = """\
 You are Brew Assistant, a knowledgeable home brewing expert helping home \
 brewers with beer styles, ingredients (hops, malts, yeasts), and substitutions.
 
-Rules:
-- Answer using ONLY the provided context documents. Each document block is \
-labeled with its source filename and type.
-- Check the context carefully before answering: the answer is often there, \
-including exact numbers (IBU, ABV, SRM, gravity) and strain or ingredient \
-names. When it is, quote those values exactly as written in the context.
-- Never sum, average, scale, or extrapolate quantities across entries. A \
-number that is not stated verbatim in the context is not in the context; say \
-so instead of computing one.
-- If the context genuinely lacks the answer — after reading the whole context \
-carefully — reply with exactly "I don't have that information." as the very \
-first sentence. You may add one short sentence naming what kind of document \
-would help, and nothing else.
+You have two sources: the numbered context documents below and your own \
+brewing knowledge. Decide per question which mode applies.
+
+FACTUAL questions — specific numbers, product specs, style stats, \
+substitution tables, recipe contents ("what is", "how much", "which values"):
+- Answer using ONLY the provided context documents; each document block is \
+labeled with its source filename and type. Check the context carefully \
+before answering: the answer is often there, including exact numbers (IBU, \
+ABV, SRM, gravity) and strain or ingredient names. When it is, quote those \
+values exactly as written in the context.
+- If the context genuinely lacks the answer — after reading the whole \
+context carefully — reply with exactly "I don't have that information." as \
+the very first sentence. You may add one short sentence naming what kind of \
+document would help, and nothing else.
 - Never attach citations to a refusal: a reply starting with "I don't have \
 that information." must contain no [N] citations, numbers, or speculation \
 about the answer.
+
+ADVICE questions — opinions, comparisons, recommendations, "which X should \
+I use", "how do I", "why", troubleshooting, process guidance:
+- Combine your own brewing knowledge with the context documents and give a \
+real recommendation. The documents ground the answer (styles, ingredients, \
+specs); your knowledge adds the reasoning, trade-offs, and practical options \
+the documents lack. Never answer an advice question with "I don't have that \
+information" when you know the answer from brewing knowledge.
+- Where the documents are silent, speak as general brewing advice — do not \
+present it as a fact quoted from a document, and do not cite a document for it.
+- Do not contradict the context about an ingredient, strain, or style it \
+describes. If your general advice and a document disagree, follow the \
+document and say so.
+- Typical ranges from experience are fine when labeled as typical \
+("usually", "a good range is"); never present them as exact document values.
+- When it matters for trust, make the split visible: document facts first \
+(cited), then your advice ("My take: ...").
+
+NUMBER SAFETY — applies in both modes:
+- Never sum, average, scale, or extrapolate quantities across entries. A \
+number that is not stated verbatim in the context is not in the context; say \
+so instead of computing one. Do not calculate recipe numbers (IBU, ABV, SRM, \
+mash adjustments); if asked for one, name the data that would be needed.
+- Exception: when the user asks how MUCH of something they need and the \
+context states a dosage rate (e.g. "50 to 80 g/hl"), multiply that one \
+stated rate by the user's own batch volume, show the arithmetic (19 L = \
+0.19 hl; 50-80 g/hl x 0.19 hl = 9.5-15.2 g), and round to a practical \
+amount. Use only a rate stated verbatim in the context — never derive a \
+new rate.
 - Never invent numbers, yeast strain names, or filenames. If it is not in \
-the context, do not state it.
+the context, do not state it as a document fact.
+- If a question is not about beer or brewing at all, reply with exactly \
+"I don't have that information." as the very first sentence, with no \
+citations and no speculation.
+
+CITATIONS — apply in both modes:
 - When you use information from a document, cite it inline as [N], where N is \
 the number of that document's context block (the context shows every block \
 numbered as "[N] source: ..."). Cite the document you actually read (for \
@@ -236,10 +272,57 @@ def get_llm(model: str | None = None, temperature: float | None = None) -> ChatO
         model=model or cfg["model"],
         temperature=settings["temperature"] if temperature is None else temperature,
         num_ctx=settings["num_ctx"],
+        reasoning=settings["reasoning"],
     )
 
 
+# ---------------------------------------------------------------------------
+# Stale-store recovery
+#
+# The chroma client is cached per process. When the collection under it is
+# deleted and re-created (re-ingest — the UI button, or a CLI `ingest.py`
+# run while the app is open), the cached handles go stale. chromadb 1.5.9
+# then fails the next calls with `NotFoundError` ("Collection ... does not
+# exist") — or, after its shared RustBindingsAPI was stopped, with
+# `AttributeError: 'RustBindingsAPI' object has no attribute 'bindings'`.
+# Both are healed by rebuilding the client (reset_caches) and retrying once.
+# ---------------------------------------------------------------------------
+
+def _is_stale_store_error(exc: BaseException) -> bool:
+    """True when an exception means the cached store handle went stale."""
+    text = str(exc)
+    if isinstance(exc, AttributeError):
+        return "bindings" in text or "RustBindingsAPI" in text
+    lowered = text.lower()
+    if type(exc).__name__ in ("NotFoundError", "ChromaError"):
+        return "does not exist" in lowered or "locked" in lowered
+    # some layers re-raise chroma failures under generic Exception types;
+    # "collection ... does not exist" and "locked" are stale-store signals
+    # regardless of the wrapper type
+    return "locked" in lowered or (
+        "collection" in lowered and "does not exist" in lowered
+    )
+
+
+def _with_store_recovery(fn):
+    """Decorator: on a stale-store failure, rebuild the client and retry once.
+
+    One in-flight question survives a re-ingest instead of erroring until
+    the app is restarted. Non-stale errors propagate unchanged.
+    """
+    def run(*args, **kwargs):
+        try:
+            return fn(*args, **kwargs)
+        except Exception as exc:
+            if not _is_stale_store_error(exc):
+                raise
+            reset_caches()
+            return fn(*args, **kwargs)
+    return run
+
+
 @lru_cache(maxsize=1)
+@_with_store_recovery
 def type_counts() -> dict[str, int]:
     """Chunk count per entity type in the store (cached per process).
 
@@ -263,6 +346,7 @@ def reset_caches() -> None:
     type_counts.cache_clear()
     _store_dump.cache_clear()
     _part_index.cache_clear()
+    _style_title_index.cache_clear()
 
 
 def type_filter(types: list[str] | None) -> dict | None:
@@ -286,16 +370,20 @@ def type_filter(types: list[str] | None) -> dict | None:
 # code, and the matching chunks are pinned at the front of the context.
 # ---------------------------------------------------------------------------
 
-# Product codes: OYL-042 / WLP300 / PIN-001Dry / us-05 (letters + optional
-# '-' + 2+ digits; no space, or "Wyeast 3068" would match "Wyeast 30"),
-# plus a bare 4-digit Wyeast-style number (3068, 2035-PC). A wrong match
-# requires an exact normalized-token collision with document content,
-# which plain question text does not produce.
+# Product codes: OYL-042 / WLP300 / PIN-001Dry / us-05 / S-04 (1+ letters +
+# optional '-' + 2+ digits; no space, or "Wyeast 3068" would match "Wyeast
+# 30"), plus a bare 4-digit Wyeast-style number (3068, 2035-PC). Single-letter
+# prefixes (S-04, T-58, K-97, E-30, W-34/70) are Fermentis product codes and
+# MUST pin like the rest. A wrong match requires an exact normalized-token
+# collision with document content, which plain question text does not produce.
 _PART_TOKEN_RE = re.compile(
-    r"\b[A-Za-z]{2,6}-?\d{2,6}[A-Za-z0-9]*\b|\b\d{4}(?:-PC)?\b",
+    r"\b[A-Za-z]{1,6}-?\d{2,6}[A-Za-z0-9]*\b|\b\d{4}(?:-PC)?\b",
     re.IGNORECASE,
 )
 MAX_PINNED_DOCS = 4
+# Style docs pinned by title match ("Tell me about English IPA."): capped so
+# a generic token ("Saison") cannot flood the context with every style doc.
+MAX_STYLE_PINS = 4
 
 
 def _norm_part(token: str) -> str:
@@ -305,11 +393,26 @@ def _norm_part(token: str) -> str:
 
 @lru_cache(maxsize=1)
 def _store_dump() -> tuple[tuple[str, ...], tuple[dict, ...]]:
-    """All (document, metadata) pairs, cached per process (see type_counts)."""
-    data = _get_vectorstore().get(include=["documents", "metadatas"])
-    documents = tuple(data.get("documents") or [])
-    metadatas = tuple(data.get("metadatas") or [])
-    return documents, metadatas
+    """All (document, metadata) pairs, cached per process (see type_counts).
+
+    Retries briefly on an inconsistent snapshot: a concurrent re-ingest
+    (deleted + re-created collection) can return documents and metadatas of
+    different lengths — caching that would poison every index built on it.
+    """
+    last: tuple[tuple[str, ...], tuple[dict, ...]] | None = None
+    for attempt in range(3):
+        data = _get_vectorstore().get(include=["documents", "metadatas"])
+        documents = tuple(data.get("documents") or [])
+        metadatas = tuple(data.get("metadatas") or [])
+        if len(documents) == len(metadatas):
+            return documents, metadatas
+        last = (documents, metadatas)
+        if attempt < 2:
+            time.sleep(1.0)
+    raise RuntimeError(
+        "chroma store snapshot inconsistent (concurrent re-ingest?): "
+        f"{len(last[0])} documents vs {len(last[1])} metadatas"
+    )
 
 
 @lru_cache(maxsize=1)
@@ -371,6 +474,47 @@ def part_number_docs(query: str) -> list[Document]:
     return pinned
 
 
+@lru_cache(maxsize=1)
+def _style_title_index() -> tuple[tuple[frozenset, int], ...]:
+    """[(title_tokens, store_index)] for style docs, cached per process."""
+    documents, metadatas = _store_dump()
+    entries = []
+    for i, meta in enumerate(metadatas):
+        meta = meta or {}
+        if meta.get("type") not in STYLE_TYPES:
+            continue
+        title_tokens = _tokens(str(meta.get("title", "")))
+        if title_tokens:
+            entries.append((title_tokens, i))
+    return tuple(entries)
+
+
+def style_title_docs(query: str) -> list[Document]:
+    """Style docs whose TITLE covers every content token of ``query``.
+
+    Deterministic style lookup (no embedding): "Tell me about English IPA."
+    pins the BJCP 11C doc even when recipe chunks mentioning "English IPA"
+    crowd the style guideline out of top-k — embeddings cannot tell a style
+    QUESTION from a recipe's style line. Same title rule as
+    :func:`style_disambiguation_matches`, but over the WHOLE store instead
+    of the retrieved docs, so multi-guideline disambiguation no longer
+    depends on retrieval happening to fetch both guideline docs (the
+    follow-up noted in AGENTS.md 6.1).
+    """
+    q_tokens = _tokens(query)
+    if not q_tokens:
+        return []
+    documents, metadatas = _store_dump()
+    pinned: list[Document] = []
+    for title_tokens, i in _style_title_index():
+        if q_tokens <= title_tokens:
+            meta = metadatas[i] or {}
+            pinned.append(Document(page_content=documents[i], metadata=meta))
+            if len(pinned) >= MAX_STYLE_PINS:
+                break
+    return pinned
+
+
 def merge_pinned(
     docs: list[Document], pinned: list[Document], limit: int
 ) -> list[Document]:
@@ -388,38 +532,45 @@ def merge_pinned(
     return merged[:limit]
 
 
+# How many recent user turns re-inject into the retrieval query. Follow-ups
+# may refer to an entity named several turns ago ("Which yeasts might be
+# good for this style?" after a style was discussed earlier), with the turns
+# in between already anaphoric themselves. Capped: more turns dilute the
+# embedding (and the model truncates long queries anyway).
+MAX_QUERY_TURNS = 3
+
+
 def expand_query(query: str, history: list[tuple[str, str]] | None) -> str:
-    """Prepend recent conversation turns so ambiguous follow-ups retrieve better.
+    """Prepend recent user turns so ambiguous follow-ups retrieve better.
 
     Short or pronoun-heavy follow-ups ("The BJCP one.", "How much Citra does
-    it use?") lack the entity names the retriever needs. Re-injecting the
-    most recent user question and the model's last answer keeps retrieval
-    grounded in the conversation without changing the chunking or vector
-    store.
+    it use?", "Which yeasts might be good for this style?") lack the entity
+    names the retriever needs. Re-injecting the most recent USER turns keeps
+    retrieval grounded in the conversation without changing the chunking or
+    vector store. Assistant turns stay out on purpose: their wording biases
+    retrieval toward what was already shown instead of surfacing fresh docs.
     """
     if not history:
         return query
-    # Prepend the previous user question; this gives short/pronoun follow-ups
-    # the entity names the retriever needs without pulling in the assistant's
-    # answer (which can bias retrieval toward its own keywords).
-    last_user = next(
-        (content for role, content in reversed(history) if role == "user"),
-        "",
-    )
-    if not last_user:
-        return query
+    user_turns = [content for role, content in history if role == "user" and content]
     # Avoid duplication if the user simply repeated the same question.
-    if last_user.strip().lower() == query.strip().lower():
+    stripped_query = query.strip()
+    user_turns = [
+        turn for turn in user_turns if turn.strip().lower() != stripped_query.lower()
+    ]
+    if not user_turns:
         return query
     # Very short or selector-style follow-ups ("The BJCP one.") are better
-    # retrieved by the original question, which already names the entity.
-    # Longer follow-ups need both the entity name and the new detail.
-    stripped_query = query.strip()
+    # retrieved by the previous user turn, which already names the entity.
     if len(stripped_query) < 30:
-        return last_user
-    return f"{last_user} {stripped_query}"
+        return user_turns[-1]
+    # Longer follow-ups need the entity names AND the new detail; several
+    # turns back because "this style" may skip one or two anaphoric turns.
+    recent = user_turns[-MAX_QUERY_TURNS:]
+    return " ".join([*recent, stripped_query])
 
 
+@_with_store_recovery
 def retrieve(query: str, k: int | None = None, types: list[str] | None = None) -> list[Document]:
     """Similarity search; k from config when omitted, optional type scope.
 
@@ -434,7 +585,7 @@ def retrieve(query: str, k: int | None = None, types: list[str] | None = None) -
     docs = _get_vectorstore().similarity_search(
         query, k=limit, filter=type_filter(types)
     )
-    pinned = part_number_docs(query)
+    pinned = part_number_docs(query) + style_title_docs(query)
     if pinned and types:
         allowed = set(types)
         pinned = [d for d in pinned if d.metadata.get("type") in allowed]
@@ -764,7 +915,14 @@ def stream_answer(
             )
         if content:
             pieces.append(content)
-    yield normalize_citations("".join(pieces))
+    answer = normalize_citations("".join(pieces))
+    if not answer.strip():
+        # Thinking models can spend their whole budget on hidden reasoning
+        # (thinking deltas stream as empty chunks) and produce zero visible
+        # tokens. Never render a silent answer: fall back to the canonical
+        # refusal so the UI hides sources and shows the standard reply.
+        answer = REFUSAL_PHRASE.capitalize() + "."
+    yield answer
 
 
 def ask(
@@ -788,4 +946,9 @@ def ask(
             part.get("text", "") if isinstance(part, dict) else str(part)
             for part in answer
         )
-    return normalize_citations(answer), docs_to_sources(docs)
+    answer = normalize_citations(answer)
+    if not answer.strip():
+        # Same guard as stream_answer: an empty answer must never render
+        # silently next to a populated sources panel.
+        answer = REFUSAL_PHRASE.capitalize() + "."
+    return answer, docs_to_sources(docs)
