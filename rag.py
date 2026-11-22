@@ -5,6 +5,7 @@ Model name/temperature/top_k come from config.yaml only — never hardcode them.
 from collections import Counter
 from functools import lru_cache
 import re
+import time
 
 from langchain_chroma import Chroma
 from langchain_core.documents import Document
@@ -275,7 +276,53 @@ def get_llm(model: str | None = None, temperature: float | None = None) -> ChatO
     )
 
 
+# ---------------------------------------------------------------------------
+# Stale-store recovery
+#
+# The chroma client is cached per process. When the collection under it is
+# deleted and re-created (re-ingest — the UI button, or a CLI `ingest.py`
+# run while the app is open), the cached handles go stale. chromadb 1.5.9
+# then fails the next calls with `NotFoundError` ("Collection ... does not
+# exist") — or, after its shared RustBindingsAPI was stopped, with
+# `AttributeError: 'RustBindingsAPI' object has no attribute 'bindings'`.
+# Both are healed by rebuilding the client (reset_caches) and retrying once.
+# ---------------------------------------------------------------------------
+
+def _is_stale_store_error(exc: BaseException) -> bool:
+    """True when an exception means the cached store handle went stale."""
+    text = str(exc)
+    if isinstance(exc, AttributeError):
+        return "bindings" in text or "RustBindingsAPI" in text
+    lowered = text.lower()
+    if type(exc).__name__ in ("NotFoundError", "ChromaError"):
+        return "does not exist" in lowered or "locked" in lowered
+    # some layers re-raise chroma failures under generic Exception types;
+    # "collection ... does not exist" and "locked" are stale-store signals
+    # regardless of the wrapper type
+    return "locked" in lowered or (
+        "collection" in lowered and "does not exist" in lowered
+    )
+
+
+def _with_store_recovery(fn):
+    """Decorator: on a stale-store failure, rebuild the client and retry once.
+
+    One in-flight question survives a re-ingest instead of erroring until
+    the app is restarted. Non-stale errors propagate unchanged.
+    """
+    def run(*args, **kwargs):
+        try:
+            return fn(*args, **kwargs)
+        except Exception as exc:
+            if not _is_stale_store_error(exc):
+                raise
+            reset_caches()
+            return fn(*args, **kwargs)
+    return run
+
+
 @lru_cache(maxsize=1)
+@_with_store_recovery
 def type_counts() -> dict[str, int]:
     """Chunk count per entity type in the store (cached per process).
 
@@ -299,6 +346,7 @@ def reset_caches() -> None:
     type_counts.cache_clear()
     _store_dump.cache_clear()
     _part_index.cache_clear()
+    _style_title_index.cache_clear()
 
 
 def type_filter(types: list[str] | None) -> dict | None:
@@ -345,11 +393,26 @@ def _norm_part(token: str) -> str:
 
 @lru_cache(maxsize=1)
 def _store_dump() -> tuple[tuple[str, ...], tuple[dict, ...]]:
-    """All (document, metadata) pairs, cached per process (see type_counts)."""
-    data = _get_vectorstore().get(include=["documents", "metadatas"])
-    documents = tuple(data.get("documents") or [])
-    metadatas = tuple(data.get("metadatas") or [])
-    return documents, metadatas
+    """All (document, metadata) pairs, cached per process (see type_counts).
+
+    Retries briefly on an inconsistent snapshot: a concurrent re-ingest
+    (deleted + re-created collection) can return documents and metadatas of
+    different lengths — caching that would poison every index built on it.
+    """
+    last: tuple[tuple[str, ...], tuple[dict, ...]] | None = None
+    for attempt in range(3):
+        data = _get_vectorstore().get(include=["documents", "metadatas"])
+        documents = tuple(data.get("documents") or [])
+        metadatas = tuple(data.get("metadatas") or [])
+        if len(documents) == len(metadatas):
+            return documents, metadatas
+        last = (documents, metadatas)
+        if attempt < 2:
+            time.sleep(1.0)
+    raise RuntimeError(
+        "chroma store snapshot inconsistent (concurrent re-ingest?): "
+        f"{len(last[0])} documents vs {len(last[1])} metadatas"
+    )
 
 
 @lru_cache(maxsize=1)
@@ -507,6 +570,7 @@ def expand_query(query: str, history: list[tuple[str, str]] | None) -> str:
     return " ".join([*recent, stripped_query])
 
 
+@_with_store_recovery
 def retrieve(query: str, k: int | None = None, types: list[str] | None = None) -> list[Document]:
     """Similarity search; k from config when omitted, optional type scope.
 

@@ -2,17 +2,18 @@
 
 Run: streamlit run app.py
 """
-import contextlib
-import io
+import subprocess
+import sys
+from pathlib import Path
 
 import requests
 import streamlit as st
 
 import rag
 from config import load_config, model_settings
-from ingest import main as ingest_main
 
 OLLAMA_TAGS_URL = "http://localhost:11434/api/tags"
+INGEST_SCRIPT = Path(__file__).resolve().parent / "ingest.py"
 
 
 def list_ollama_models() -> list[str]:
@@ -138,16 +139,27 @@ def main() -> None:
         st.divider()
         if st.button("🔄 Re-ingest data", use_container_width=True):
             with st.spinner("Re-ingesting documents into ChromaDB..."):
-                buf = io.StringIO()
-                try:
-                    with contextlib.redirect_stdout(buf):
-                        ingest_main()
-                except SystemExit as e:
-                    st.error(str(e))
-                    return
+                # Run ingest in a SUBPROCESS: it deletes and re-creates the
+                # collection, and doing that in-process would invalidate the
+                # app's cached chroma handles mid-session (stale-collection
+                # errors, 'RustBindingsAPI' has no attribute 'bindings').
+                result = subprocess.run(
+                    [sys.executable, str(INGEST_SCRIPT)],
+                    capture_output=True,
+                    text=True,
+                    encoding="utf-8",
+                    errors="replace",
+                )
                 rag.reset_caches()  # drop stale store + type counts
-            last_line = buf.getvalue().splitlines()[-1] if buf.getvalue() else "done"
-            st.success(f"Re-ingested: {last_line}")
+            if result.returncode != 0:
+                st.error(
+                    "Re-ingest failed: "
+                    + (result.stderr.strip() or result.stdout.strip()[-400:])
+                )
+            else:
+                lines = [ln for ln in result.stdout.splitlines() if ln.strip()]
+                last_line = lines[-1] if lines else "done"
+                st.success(f"Re-ingested: {last_line}")
 
         if st.button("🗑️ Clear chat", use_container_width=True):
             st.session_state.messages = []
