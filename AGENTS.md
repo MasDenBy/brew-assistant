@@ -166,6 +166,26 @@ dry yeast needs no starter).
   (12), IBU calculation (13), Dead Pony Club mash pH (24).
 - tests/test_refusal.py unchanged (phrase + detector untouched).
 
+Follow-up fixes, same day (2026-11-22) — "how many packs of S-04 for 19 L
+at OG 20 °P" still refused with the two-tier prompt in place. Three stacked
+causes, all fixed:
+
+1. Retrieval pin gap: `_PART_TOKEN_RE` required 2+ letters before the code,
+   so Fermentis single-letter codes (S-04, T-58, K-97, E-30, W-34/70) never
+   pinned — even with "S-04" in the query the doc fell out of top-8
+   (verified: top-8 was all White Labs/Wyeast/recipes). Regex now allows
+   1+ letters; tests/test_part_number_retrieval.py covers S-04/T-58/K-97.
+2. Collector gap: Fermentis pages state pack sizes ("Available in 11,5g –
+   100g – 500g and 10kg packaging.") but the collector dropped the line.
+   New `packaging` field → rendered as a "Packaging:" Key Specs bullet.
+   Requires re-collect (python -m collectors) + re-ingest.
+3. Prompt gap: NUMBER SAFETY forbade the dosage arithmetic. New exception:
+   one rate stated verbatim in the context × the user's own batch volume,
+   with the arithmetic shown (19 L = 0.19 hl; 50-80 g/hl × 0.19 hl =
+   9.5-15.2 g), rounded to a practical amount. IBU/ABV/SRM formulas stay
+   forbidden. Eval row added (naming S-04 — a history-free "this yeast"
+   cannot be resolved and should ask a clarifying question).
+
 ---
 
 ## 7. Recommended Immediate Next Steps

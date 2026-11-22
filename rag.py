@@ -184,6 +184,12 @@ NUMBER SAFETY — applies in both modes:
 number that is not stated verbatim in the context is not in the context; say \
 so instead of computing one. Do not calculate recipe numbers (IBU, ABV, SRM, \
 mash adjustments); if asked for one, name the data that would be needed.
+- Exception: when the user asks how MUCH of something they need and the \
+context states a dosage rate (e.g. "50 to 80 g/hl"), multiply that one \
+stated rate by the user's own batch volume, show the arithmetic (19 L = \
+0.19 hl; 50-80 g/hl x 0.19 hl = 9.5-15.2 g), and round to a practical \
+amount. Use only a rate stated verbatim in the context — never derive a \
+new rate.
 - Never invent numbers, yeast strain names, or filenames. If it is not in \
 the context, do not state it as a document fact.
 - If a question is not about beer or brewing at all, reply with exactly \
@@ -315,13 +321,14 @@ def type_filter(types: list[str] | None) -> dict | None:
 # code, and the matching chunks are pinned at the front of the context.
 # ---------------------------------------------------------------------------
 
-# Product codes: OYL-042 / WLP300 / PIN-001Dry / us-05 (letters + optional
-# '-' + 2+ digits; no space, or "Wyeast 3068" would match "Wyeast 30"),
-# plus a bare 4-digit Wyeast-style number (3068, 2035-PC). A wrong match
-# requires an exact normalized-token collision with document content,
-# which plain question text does not produce.
+# Product codes: OYL-042 / WLP300 / PIN-001Dry / us-05 / S-04 (1+ letters +
+# optional '-' + 2+ digits; no space, or "Wyeast 3068" would match "Wyeast
+# 30"), plus a bare 4-digit Wyeast-style number (3068, 2035-PC). Single-letter
+# prefixes (S-04, T-58, K-97, E-30, W-34/70) are Fermentis product codes and
+# MUST pin like the rest. A wrong match requires an exact normalized-token
+# collision with document content, which plain question text does not produce.
 _PART_TOKEN_RE = re.compile(
-    r"\b[A-Za-z]{2,6}-?\d{2,6}[A-Za-z0-9]*\b|\b\d{4}(?:-PC)?\b",
+    r"\b[A-Za-z]{1,6}-?\d{2,6}[A-Za-z0-9]*\b|\b\d{4}(?:-PC)?\b",
     re.IGNORECASE,
 )
 MAX_PINNED_DOCS = 4

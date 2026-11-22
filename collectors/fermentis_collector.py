@@ -68,7 +68,7 @@ from html.parser import HTMLParser
 from pathlib import Path
 
 from .base import DataCollector, SourceUnavailableError, register
-from .web import fetch
+from .web import fetch, fetch_text, html_to_markdown
 
 API_URL = (
     "https://fermentis.com/wp-json/wp/v2/product"
@@ -114,6 +114,9 @@ DIRECT_PITCHING_LINE = (
     "Direct pitching: sprinkle the dry yeast onto the wort surface at or "
     "above fermentation temperature."
 )
+# pack-size line near the page header ("Available in 11,5g – 100g – 500g and
+# 10kg packaging."); the captured group keeps the sizes in page wording
+_PACKAGING_RE = re.compile(r"available in\s+(.+?)\s+packaging", re.IGNORECASE)
 # universal storage paragraph (identical on every standard product page)
 _CANONICAL_STORAGE_PREFIX = "for less than 6 months"
 _CANONICAL_STORAGE = (
@@ -143,6 +146,7 @@ class Yeast:
     dosage: str = ""          # "80 to 120 g/hl at ideally 12°C – 18°C ..."
     usage: str = ""           # product-specific usage instructions, squashed
     direct_pitching: bool = False   # dosage panel had the ① Direct pitching marker
+    packaging: str = ""       # "11,5g – 100g – 500g and 10kg" (pack sizes)
     viability: str = ""       # "> 6.0 *10^9 cfu/g"
     purity: str = ""          # "> 99.9 %"
     storage: str = ""         # storage temperature rules (canonical or raw)
@@ -300,6 +304,7 @@ class _ProductParser(HTMLParser):
         self.dosage_parts: list[str] = []        # dosage panel: first kept p
         self.usage_parts: list[str] = []         # dosage panel: product-specific
         self.direct_pitching = False
+        self.packaging = ""                      # pack sizes line, if present
         self.viability = ""
         self.purity = ""
         self.storage_parts: list[str] = []
@@ -378,6 +383,12 @@ class _ProductParser(HTMLParser):
     def _finish_paragraph(self, raw: str) -> None:
         text = _squash(raw)
         if not text:
+            return
+        # pack-size line ("Available in 11,5g – 100g – 500g and 10kg
+        # packaging.") sits near the header, outside every section panel
+        m = _PACKAGING_RE.search(text)
+        if m:
+            self.packaging = m.group(1).strip(" .")
             return
         if self._section == "description":
             folded = text.casefold()
@@ -668,6 +679,7 @@ def parse_item(item: dict[str, str]) -> Yeast | None:
         dosage=dosage,
         usage=_truncate(usage, USAGE_MAX_CHARS),
         direct_pitching=parser.direct_pitching,
+        packaging=parser.packaging,
         viability=_analysis_value(parser.viability),
         purity=_analysis_value(parser.purity),
         storage=storage,
@@ -680,6 +692,17 @@ def _analysis_value(text: str) -> str:
     """``Viable yeast > 6.0 *10^9 cfu/g`` -> ``> 6.0 *10^9 cfu/g``."""
     stripped = _LABEL_RE.sub("", text).strip(" :")
     return re.sub(r"\^(\d+)cfu", r"^\1 cfu", stripped)
+
+
+def packaging_from_page(page_html: str) -> str:
+    """Extract the pack-size line from a rendered product page.
+
+    "Available in 11,5g - 100g - 500g and 10kg packaging." is theme-rendered
+    and absent from the REST payload (verified 2026-11-22), so it needs a
+    page fetch. Empty when the line is absent or reworded.
+    """
+    m = _PACKAGING_RE.search(html_to_markdown(page_html))
+    return m.group(1).strip(" .") if m else ""
 
 
 def _join_usage(parts: list[str]) -> str:
@@ -744,6 +767,8 @@ def render_yeast(yeast: Yeast) -> str:
         spec_lines.append(f"- Viability: {yeast.viability}")
     if yeast.purity:
         spec_lines.append(f"- Purity: {yeast.purity}")
+    if yeast.packaging:
+        spec_lines.append(f"- Packaging: {yeast.packaging}")
     if spec_lines:
         lines += ["## Key Specs", *spec_lines, ""]
 
@@ -860,6 +885,12 @@ class FermentisCollector(DataCollector):
                 "automated access"
             )
 
+        # Pack sizes live only on the rendered product pages; best effort —
+        # a failed page fetch leaves packaging empty rather than failing
+        # the whole run (dosage/specs from the REST payload still land).
+        for yeast in yeasts:
+            yeast.packaging = self._fetch_packaging(yeast)
+
         rendered: dict[str, str] = {}
         for yeast in yeasts:
             filename = yeast_filename(yeast)
@@ -879,6 +910,17 @@ class FermentisCollector(DataCollector):
         return write_documents(rendered, dest)
 
     # -- fetching --------------------------------------------------------
+    @staticmethod
+    def _fetch_packaging(yeast: Yeast) -> str:
+        """Fetch the rendered product page for the pack-size line (fail-soft)."""
+        if not yeast.source_url:
+            return yeast.packaging
+        try:
+            page = fetch_text(yeast.source_url)
+        except SourceUnavailableError:
+            return yeast.packaging
+        return packaging_from_page(page) or yeast.packaging
+
     @staticmethod
     def _list_products() -> list[dict[str, str]]:
         """Walk the REST API pages until one returns fewer than a full page."""
