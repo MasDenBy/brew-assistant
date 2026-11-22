@@ -135,6 +135,39 @@ Implementation notes:
 
 ---
 
+### 6.2 Two-tier answer policy (decided 2026-11-22)
+
+The assistant is a colleague, not a search box. The old prompt-only rule
+"answer ONLY from context" made it refuse opinion/synthesis questions
+("which hops for a hoppy saison?") and hide the *why* behind grounded
+answers (S-04 "starter" → bare rehydration steps, with no explanation that
+dry yeast needs no starter).
+
+- `SYSTEM_PROMPT` (rag.py) defines two modes:
+  - FACTUAL (numbers, product specs, style stats, substitution tables,
+    recipe contents): RAG-only, verbatim quoting, canonical refusal
+    ("I don't have that information.") when the docs lack the answer.
+  - ADVICE (opinions, comparisons, "which X should I use", troubleshooting,
+    "how do I"): model knowledge + context grounding, real recommendation
+    required; general knowledge carries no citation and is never presented
+    as a document fact; document/general-knowledge contradictions resolve
+    in favor of the documents.
+- NUMBER SAFETY is global (both modes): no summing/averaging/scaling or
+  computing IBU/ABV/SRM; no invented numbers as document facts; off-topic
+  (non-brewing) questions still refuse with the canonical phrase, and the
+  UI still hides sources for refusals (`is_refusal` unchanged).
+- Deliberately rejected — local-first stays a HARD constraint
+  (reconfirmed 2026-11-22): web search, and an OpenAI sub-agent escalation
+  for "unsure" cases. Local Q/A logging for a future eval/fine-tuning
+  dataset: proposed, deferred (separate task).
+- Eval: two regression rows appended to tests/eval_questions.csv (hoppy
+  saison advice, S-04 starter) — need a live eval re-run. Refusal rows
+  must keep refusing: Maris Otter substitution (row 10), chocolate malt
+  (12), IBU calculation (13), Dead Pony Club mash pH (24).
+- tests/test_refusal.py unchanged (phrase + detector untouched).
+
+---
+
 ## 7. Recommended Immediate Next Steps
 
 1. Install Ollama and pull a 7B model (e.g., `llama3.1:8b` or `qwen2.5:7b`) to verify it runs on the RTX 3060.
