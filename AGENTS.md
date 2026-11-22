@@ -207,6 +207,32 @@ good for this style?". Two layers make that work:
 
 ---
 
+### 6.4 Thinking models & style pinning (2026-11-22)
+
+gemma4:12b produced "silent" answers — nothing (not even the refusal
+phrase) next to a populated sources panel. Two causes, both fixed:
+
+- Thinking models: Ollama streams hidden `thinking` tokens separately;
+  langchain-ollama surfaces them as EMPTY chunks, and reasoning can spend
+  the entire remaining context window, leaving zero visible tokens.
+  `get_llm` now passes `reasoning=model_settings(...)` — global
+  `reasoning: false` in config.yaml (per-model override possible).
+  Verified: 1117 empty chunks -> 2 with reasoning disabled.
+- Never render silence: `ask()`/`stream_answer()` fall back to the
+  canonical refusal phrase when the model's answer is empty/whitespace, so
+  the UI hides sources and shows a sane reply instead of nothing.
+- Style docs crowded out of retrieval: "Tell me about English IPA."
+  retrieved 8/8 recipes (their "Style: English IPA" lines match the
+  question better than the guideline doc). `style_title_docs()` pins style
+  docs whose TITLE covers every content token of the query (same rule as
+  the disambiguation matcher, over the whole store, capped
+  MAX_STYLE_PINS=4). Part-number pins keep priority; both respect a type
+  scope filter. Disambiguation now fires deterministically for multi-
+  guideline matches (closes the AGENTS.md 6.1 follow-up "per-guideline
+  coverage for style queries"). Tests: tests/test_style_pins.py.
+
+---
+
 ## 7. Recommended Immediate Next Steps
 
 1. Install Ollama and pull a 7B model (e.g., `llama3.1:8b` or `qwen2.5:7b`) to verify it runs on the RTX 3060.

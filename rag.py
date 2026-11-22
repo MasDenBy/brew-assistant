@@ -271,6 +271,7 @@ def get_llm(model: str | None = None, temperature: float | None = None) -> ChatO
         model=model or cfg["model"],
         temperature=settings["temperature"] if temperature is None else temperature,
         num_ctx=settings["num_ctx"],
+        reasoning=settings["reasoning"],
     )
 
 
@@ -332,6 +333,9 @@ _PART_TOKEN_RE = re.compile(
     re.IGNORECASE,
 )
 MAX_PINNED_DOCS = 4
+# Style docs pinned by title match ("Tell me about English IPA."): capped so
+# a generic token ("Saison") cannot flood the context with every style doc.
+MAX_STYLE_PINS = 4
 
 
 def _norm_part(token: str) -> str:
@@ -407,6 +411,47 @@ def part_number_docs(query: str) -> list[Document]:
     return pinned
 
 
+@lru_cache(maxsize=1)
+def _style_title_index() -> tuple[tuple[frozenset, int], ...]:
+    """[(title_tokens, store_index)] for style docs, cached per process."""
+    documents, metadatas = _store_dump()
+    entries = []
+    for i, meta in enumerate(metadatas):
+        meta = meta or {}
+        if meta.get("type") not in STYLE_TYPES:
+            continue
+        title_tokens = _tokens(str(meta.get("title", "")))
+        if title_tokens:
+            entries.append((title_tokens, i))
+    return tuple(entries)
+
+
+def style_title_docs(query: str) -> list[Document]:
+    """Style docs whose TITLE covers every content token of ``query``.
+
+    Deterministic style lookup (no embedding): "Tell me about English IPA."
+    pins the BJCP 11C doc even when recipe chunks mentioning "English IPA"
+    crowd the style guideline out of top-k — embeddings cannot tell a style
+    QUESTION from a recipe's style line. Same title rule as
+    :func:`style_disambiguation_matches`, but over the WHOLE store instead
+    of the retrieved docs, so multi-guideline disambiguation no longer
+    depends on retrieval happening to fetch both guideline docs (the
+    follow-up noted in AGENTS.md 6.1).
+    """
+    q_tokens = _tokens(query)
+    if not q_tokens:
+        return []
+    documents, metadatas = _store_dump()
+    pinned: list[Document] = []
+    for title_tokens, i in _style_title_index():
+        if q_tokens <= title_tokens:
+            meta = metadatas[i] or {}
+            pinned.append(Document(page_content=documents[i], metadata=meta))
+            if len(pinned) >= MAX_STYLE_PINS:
+                break
+    return pinned
+
+
 def merge_pinned(
     docs: list[Document], pinned: list[Document], limit: int
 ) -> list[Document]:
@@ -476,7 +521,7 @@ def retrieve(query: str, k: int | None = None, types: list[str] | None = None) -
     docs = _get_vectorstore().similarity_search(
         query, k=limit, filter=type_filter(types)
     )
-    pinned = part_number_docs(query)
+    pinned = part_number_docs(query) + style_title_docs(query)
     if pinned and types:
         allowed = set(types)
         pinned = [d for d in pinned if d.metadata.get("type") in allowed]
@@ -806,7 +851,14 @@ def stream_answer(
             )
         if content:
             pieces.append(content)
-    yield normalize_citations("".join(pieces))
+    answer = normalize_citations("".join(pieces))
+    if not answer.strip():
+        # Thinking models can spend their whole budget on hidden reasoning
+        # (thinking deltas stream as empty chunks) and produce zero visible
+        # tokens. Never render a silent answer: fall back to the canonical
+        # refusal so the UI hides sources and shows the standard reply.
+        answer = REFUSAL_PHRASE.capitalize() + "."
+    yield answer
 
 
 def ask(
@@ -830,4 +882,9 @@ def ask(
             part.get("text", "") if isinstance(part, dict) else str(part)
             for part in answer
         )
-    return normalize_citations(answer), docs_to_sources(docs)
+    answer = normalize_citations(answer)
+    if not answer.strip():
+        # Same guard as stream_answer: an empty answer must never render
+        # silently next to a populated sources panel.
+        answer = REFUSAL_PHRASE.capitalize() + "."
+    return answer, docs_to_sources(docs)
