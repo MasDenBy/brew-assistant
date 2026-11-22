@@ -424,36 +424,42 @@ def merge_pinned(
     return merged[:limit]
 
 
+# How many recent user turns re-inject into the retrieval query. Follow-ups
+# may refer to an entity named several turns ago ("Which yeasts might be
+# good for this style?" after a style was discussed earlier), with the turns
+# in between already anaphoric themselves. Capped: more turns dilute the
+# embedding (and the model truncates long queries anyway).
+MAX_QUERY_TURNS = 3
+
+
 def expand_query(query: str, history: list[tuple[str, str]] | None) -> str:
-    """Prepend recent conversation turns so ambiguous follow-ups retrieve better.
+    """Prepend recent user turns so ambiguous follow-ups retrieve better.
 
     Short or pronoun-heavy follow-ups ("The BJCP one.", "How much Citra does
-    it use?") lack the entity names the retriever needs. Re-injecting the
-    most recent user question and the model's last answer keeps retrieval
-    grounded in the conversation without changing the chunking or vector
-    store.
+    it use?", "Which yeasts might be good for this style?") lack the entity
+    names the retriever needs. Re-injecting the most recent USER turns keeps
+    retrieval grounded in the conversation without changing the chunking or
+    vector store. Assistant turns stay out on purpose: their wording biases
+    retrieval toward what was already shown instead of surfacing fresh docs.
     """
     if not history:
         return query
-    # Prepend the previous user question; this gives short/pronoun follow-ups
-    # the entity names the retriever needs without pulling in the assistant's
-    # answer (which can bias retrieval toward its own keywords).
-    last_user = next(
-        (content for role, content in reversed(history) if role == "user"),
-        "",
-    )
-    if not last_user:
-        return query
+    user_turns = [content for role, content in history if role == "user" and content]
     # Avoid duplication if the user simply repeated the same question.
-    if last_user.strip().lower() == query.strip().lower():
+    stripped_query = query.strip()
+    user_turns = [
+        turn for turn in user_turns if turn.strip().lower() != stripped_query.lower()
+    ]
+    if not user_turns:
         return query
     # Very short or selector-style follow-ups ("The BJCP one.") are better
-    # retrieved by the original question, which already names the entity.
-    # Longer follow-ups need both the entity name and the new detail.
-    stripped_query = query.strip()
+    # retrieved by the previous user turn, which already names the entity.
     if len(stripped_query) < 30:
-        return last_user
-    return f"{last_user} {stripped_query}"
+        return user_turns[-1]
+    # Longer follow-ups need the entity names AND the new detail; several
+    # turns back because "this style" may skip one or two anaphoric turns.
+    recent = user_turns[-MAX_QUERY_TURNS:]
+    return " ".join([*recent, stripped_query])
 
 
 def retrieve(query: str, k: int | None = None, types: list[str] | None = None) -> list[Document]:

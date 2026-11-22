@@ -188,6 +188,25 @@ causes, all fixed:
 
 ---
 
+### 6.3 Dialogue history (decided 2026-11-22)
+
+Normal use is a dialogue: discuss a style, then ask "Which yeasts might be
+good for this style?". Two layers make that work:
+
+- Generation: the LLM sees recent turns (max_history_turns + token budget,
+  app.py passes full history; caption shows "history: N of M turns").
+- Retrieval: `expand_query` re-injects the last MAX_QUERY_TURNS (3) USER
+  turns into the retrieval query, so deep anaphora resolves ("this style"
+  named 2+ turns back, with anaphoric turns in between). Assistant turns
+  are excluded on purpose: their wording biases retrieval toward what was
+  already shown. Part-number pinning fires on codes from any injected turn.
+- Short selector follow-ups (<30 chars, "The BJCP one.") retrieve by the
+  last user turn alone (replaced, not appended).
+- Tests: tests/test_expand_query.py (offline). Verified live: 3-turn
+  saison dialogue retrieves 8/8 saison yeasts on every turn.
+
+---
+
 ## 7. Recommended Immediate Next Steps
 
 1. Install Ollama and pull a 7B model (e.g., `llama3.1:8b` or `qwen2.5:7b`) to verify it runs on the RTX 3060.
